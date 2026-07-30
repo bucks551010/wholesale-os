@@ -88,6 +88,37 @@ def get_distress_signals(parcel_id: str) -> list[str]:
     return signals
 
 
+def _save_parcel_to_my_work(parcel_id: str):
+    """Look up or create a lead, then open it in the My Work workspace."""
+    lead = execute("SELECT id FROM leads WHERE parcel_id=%s LIMIT 1", (parcel_id,))
+    if lead:
+        lead_id = lead[0]["id"]
+    else:
+        # Create a manual lead for parcels not in the scored set
+        r = execute(
+            "INSERT INTO leads (parcel_id, source, date_added, motivated_score, status, priority) "
+            "VALUES (%s,'manual',NOW(),0,'new_lead','low') RETURNING id",
+            (parcel_id,), commit=True
+        )
+        lead_id = r[0]["id"] if r else None
+    if not lead_id:
+        st.error("Could not save this property.")
+        return
+    existing = execute(
+        "SELECT id FROM active_deals WHERE lead_id=%s AND status!='dead' LIMIT 1", (lead_id,)
+    )
+    if existing:
+        st.session_state["mw_deal_id"] = existing[0]["id"]
+    else:
+        r2 = execute(
+            "INSERT INTO active_deals (lead_id, status, created_at) VALUES (%s,'new_lead',NOW()) RETURNING id",
+            (lead_id,), commit=True
+        )
+        if r2:
+            st.session_state["mw_deal_id"] = r2[0]["id"]
+    st.switch_page("pages/08_My_Work.py")
+
+
 def show_property_card(row: dict):
     left, right = st.columns(2)
 
@@ -140,12 +171,14 @@ def show_property_card(row: dict):
         st.markdown("✅ No distress signals found yet — run ingestion jobs to populate.")
 
     st.divider()
-    a1, a2, a3 = st.columns(3)
+    a1, a2, a3, a4 = st.columns(4)
     a1.button("➕ Add as Lead",       key=f"lead_{row['parcel_id']}")
     if a2.button("💰 Run Deal Analysis", key=f"deal_{row['parcel_id']}"):
         st.session_state["analysis_parcel_id"] = row["parcel_id"]
         st.switch_page("pages/04_Analysis.py")
     a3.button("📋 View Full History", key=f"hist_{row['parcel_id']}")
+    if a4.button("📁 Save to My Work", key=f"work_{row['parcel_id']}", type="primary"):
+        _save_parcel_to_my_work(row["parcel_id"])
 
 
 # ── Search input (below all function definitions) ─────────────────────────────

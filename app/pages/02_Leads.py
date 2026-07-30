@@ -61,6 +61,22 @@ def contact_log_dialog(lead_id: int, parcel_id: str, address: str,
 st.set_page_config(page_title="Leads", page_icon="🎯", layout="wide")
 st.title("🎯 Distressed Property Leads")
 
+
+def _save_to_my_work(lead_id: int):
+    existing = execute(
+        "SELECT id FROM active_deals WHERE lead_id=%s AND status!='dead' LIMIT 1", (lead_id,)
+    )
+    if existing:
+        st.session_state["mw_deal_id"] = existing[0]["id"]
+    else:
+        r = execute(
+            "INSERT INTO active_deals (lead_id, status, created_at) VALUES (%s,'new_lead',NOW()) RETURNING id",
+            (lead_id,), commit=True
+        )
+        if r:
+            st.session_state["mw_deal_id"] = r[0]["id"]
+    st.switch_page("pages/08_My_Work.py")
+
 # ── Value ranges (loaded once for slider bounds) ──────────────────────────────
 @st.cache_data(ttl=3600)
 def get_filter_bounds():
@@ -158,6 +174,11 @@ with st.sidebar:
         "Year Built (newest first)",
         "Address A→Z",
     ])
+
+    st.divider()
+    max_rows = st.number_input("Max results to load", min_value=100, max_value=10000,
+                               value=1000, step=100,
+                               help="Raise this to see more properties. Table view handles large numbers well; Card view slows above ~500.")
 
     run_score = st.button("🔄 Re-score All Leads", type="secondary",
                           help="~2 min — recomputes from HCAD data")
@@ -290,7 +311,7 @@ rows = execute(f"""
     LEFT JOIN deal_scores ds ON ds.lead_id = l.id
     WHERE {where}
     ORDER BY {order}
-    LIMIT 500
+    LIMIT {int(max_rows)}
 """, params)
 
 # ── Stats header ──────────────────────────────────────────────────────────────
@@ -309,7 +330,8 @@ st.divider()
 
 # ── View toggle ───────────────────────────────────────────────────────────────
 view = st.radio("View", ["📋 Table", "🃏 Cards"], horizontal=True, label_visibility="collapsed")
-st.caption(f"Showing up to 500 matches — use filters to narrow down")
+more_indicator = f" (showing first {int(max_rows):,} — increase 'Max results' in sidebar for more)" if len(rows) == int(max_rows) else ""
+st.caption(f"Showing {len(rows):,} matching leads{more_indicator}")
 
 PRIORITY_ICON = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 CONDITION_ICON = {"Very Low": "💀", "Low": "⚠️", "Average": "➖", "Good": "✅", "Excellent": "✅", "Superior": "✅"}
@@ -360,7 +382,7 @@ if view == "📋 Table":
                             label_visibility="collapsed")
     sel_row  = next((r for r in rows if (r["full_address"] or r["parcel_id"]) == sel_addr), rows[0])
 
-    act1, act2, act3 = st.columns(3)
+    act1, act2, act3, act4 = st.columns(4)
     if act1.button("🔍 Full Profile"):
         st.session_state["search_query"] = sel_row["parcel_id"]
         st.switch_page("pages/01_Search.py")
@@ -375,6 +397,8 @@ if view == "📋 Table":
             mail_city=sel_row.get("mail_city") or sel_row.get("situs_city") or "",
             mail_state=sel_row.get("mail_state") or "TX",
         )
+    if act4.button("📁 My Work"):
+        _save_to_my_work(sel_row["lead_id"])
 
 # ── CARD VIEW ─────────────────────────────────────────────────────────────────
 else:
@@ -414,14 +438,14 @@ else:
             c_.markdown(f"**Living Area:** {sqft_str}")
             c_.markdown(f"**Class:** {row['building_class'] or '—'}")
 
-            col_v, col_a, col_p, col_c = st.columns(4)
+            col_v, col_a, col_p, col_c, col_w = st.columns(5)
             if col_v.button("🔍 Profile", key=f"prof_{row['lead_id']}"):
                 st.session_state["search_query"] = row["parcel_id"]
                 st.switch_page("pages/01_Search.py")
             if col_a.button("💡 Analysis", key=f"anal_{row['lead_id']}"):
                 st.session_state["analysis_parcel_id"] = row["parcel_id"]
                 st.switch_page("pages/04_Analysis.py")
-            if col_c.button("📋 Log / Skip-Trace", key=f"log_{row['lead_id']}"):
+            if col_c.button("📋 Log", key=f"log_{row['lead_id']}"):
                 contact_log_dialog(
                     lead_id=row["lead_id"], parcel_id=row["parcel_id"],
                     address=row["full_address"] or row["parcel_id"],
@@ -439,4 +463,6 @@ else:
                     )
                     st.success("Added!")
                     st.rerun()
+            if col_w.button("📁 My Work", key=f"work_{row['lead_id']}"):
+                _save_to_my_work(row["lead_id"])
 
