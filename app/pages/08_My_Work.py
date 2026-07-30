@@ -22,6 +22,7 @@ execute("""
     )
 """, commit=True)
 execute("ALTER TABLE active_deals ADD COLUMN IF NOT EXISTS seller_notes TEXT", commit=True)
+execute("ALTER TABLE active_deals ADD COLUMN IF NOT EXISTS assignment_price NUMERIC", commit=True)
 
 st.title("📁 My Work")
 st.caption("Save properties, track every deal detail, log contacts, and manage tasks — all in one workspace.")
@@ -380,67 +381,94 @@ with right_col:
         # ── Live Assignment Fee Calculator ─────────────────────────────────
         st.divider()
         st.subheader("🏷️ Your Assignment Fee Calculator")
+        st.caption("Your fee = what your buyer pays you − what you pay the seller.")
 
-        _bldg_fc = execute("""
-            SELECT living_area, condition FROM buildings
-            WHERE parcel_id=%s AND building_num=1 LIMIT 1
-        """, (parcel_id,))
-        _sqft_fc = float((_bldg_fc[0]["living_area"] or 1200) if _bldg_fc else 1200)
-        _cond_fc = ((_bldg_fc[0]["condition"] or "Low") if _bldg_fc else "Low")
-        _lo_fc, _hi_fc = REPAIR_RATES.get(_cond_fc, (28, 40))
-        _def_arv_fc = int(float(latest_val[0]["arv_estimate"]) if latest_val and latest_val[0]["arv_estimate"]
-                          else float(d["total_mkt_val"] or 0) * 1.15)
-        _def_rep_fc = int((_lo_fc + _hi_fc) / 2 * _sqft_fc)
-        _def_off_fc = int(d["purchase_price"] or 0)
+        _def_contract = int(d["purchase_price"] or 0)
+        _def_assign   = int(d["assignment_price"] or 0) if d["assignment_price"] else 0
 
-        cal1, cal2 = st.columns(2)
-        fc_arv     = cal1.number_input("ARV ($)", min_value=0, value=_def_arv_fc, step=5000, key="mw_dn_arv")
-        fc_repairs = cal2.number_input("Your Repair Estimate ($)", min_value=0, value=_def_rep_fc, step=1000,
-                                        key="mw_dn_rep",
-                                        help=f"Condition '{_cond_fc}' benchmark: ~${_def_rep_fc:,}")
-        cal3, cal4 = st.columns(2)
-        fc_closing  = cal3.number_input("Closing Costs ($)", min_value=0, value=3000, step=500, key="mw_dn_cls")
-        fc_pct_lbl  = cal4.radio("Buyer's %", ["60%", "65%", "70%"], index=1, horizontal=True, key="mw_dn_pct")
-        fc_pct      = int(fc_pct_lbl[:-1]) / 100
-        fc_offer    = st.number_input("Your Contract Price (what you pay seller) ($)",
-                                       min_value=0, value=_def_off_fc, step=1000, key="mw_dn_offer")
+        ap1, ap2 = st.columns(2)
+        fc_contract = ap1.number_input(
+            "Your Contract Price (what you pay seller) ($)",
+            min_value=0, value=_def_contract, step=1000, key="mw_dn_contract",
+        )
+        fc_assign = ap2.number_input(
+            "Your Assignment Price (what buyer pays you) ($)",
+            min_value=0, value=_def_assign, step=1000, key="mw_dn_assign",
+        )
 
-        fc_mao = fc_arv * fc_pct - fc_repairs - fc_closing
-        fc_fee = fc_mao - fc_offer
+        fc_fee = fc_assign - fc_contract
 
-        cm1, cm2, cm3, cm4 = st.columns(4)
-        cm1.metric("ARV",            fmt_currency(fc_arv))
-        cm2.metric("Buyer's MAO",    fmt_currency(max(0, fc_mao)))
-        cm3.metric("Contract Price", fmt_currency(fc_offer))
-        cm4.metric("🏷️ YOUR FEE",   fmt_currency(fc_fee),
-                   delta="✅ Feasible" if fc_fee > 0 else "❌ Underwater",
+        mf1, mf2, mf3 = st.columns(3)
+        mf1.metric("Your Contract Price",    fmt_currency(fc_contract))
+        mf2.metric("Your Assignment Price",  fmt_currency(fc_assign))
+        mf3.metric("🏷️ YOUR ASSIGNMENT FEE", fmt_currency(fc_fee),
+                   delta="✅ You profit" if fc_fee > 0 else ("❌ Negative" if fc_contract > 0 else "Enter prices"),
                    delta_color="normal" if fc_fee > 0 else "inverse")
 
-        with st.expander("📊 All 3 scenarios at your numbers"):
+        if st.button("💾 Save These Numbers", key="mw_dn_save", type="primary"):
+            execute("""
+                UPDATE active_deals SET
+                    purchase_price=%s, assignment_price=%s, assignment_fee_target=%s
+                WHERE id=%s
+            """, (fc_contract or None, fc_assign or None,
+                  max(0, fc_fee) or None, deal_id), commit=True)
+            execute("""
+                INSERT INTO offer_options
+                    (lead_id, scenario, offer_price, target_fee, feasible, calc_date)
+                VALUES (%s,%s,%s,%s,%s,NOW())
+            """, (lead_id,
+                  f"Contract ${fc_contract:,} → Assign ${fc_assign:,}",
+                  fc_contract, max(0, fc_fee), fc_fee > 0), commit=True)
+            st.success("Numbers saved!")
+            st.rerun()
+
+        with st.expander("🔍 Validate: Is your assignment price within the buyer's MAO?"):
+            st.caption(
+                "Cash buyers using the 65% rule won't pay more than "
+                "ARV × % − repairs − closing. Check that your assignment price is below their max."
+            )
+            _bldg_fc = execute("""
+                SELECT living_area, condition FROM buildings
+                WHERE parcel_id=%s AND building_num=1 LIMIT 1
+            """, (parcel_id,))
+            _sqft_fc = float((_bldg_fc[0]["living_area"] or 1200) if _bldg_fc else 1200)
+            _cond_fc = ((_bldg_fc[0]["condition"] or "Low") if _bldg_fc else "Low")
+            _lo_fc, _hi_fc = REPAIR_RATES.get(_cond_fc, (28, 40))
+            _def_arv_fc = int(float(latest_val[0]["arv_estimate"]) if latest_val and latest_val[0]["arv_estimate"]
+                              else float(d["total_mkt_val"] or 0) * 1.15)
+            _def_rep_fc = int((_lo_fc + _hi_fc) / 2 * _sqft_fc)
+
+            val1, val2 = st.columns(2)
+            v_arv     = val1.number_input("ARV ($)", min_value=0, value=_def_arv_fc, step=5000, key="mw_dn_arv")
+            v_repairs = val2.number_input("Repair Estimate ($)", min_value=0, value=_def_rep_fc, step=1000,
+                                           key="mw_dn_rep",
+                                           help=f"Condition '{_cond_fc}' benchmark: ~${_def_rep_fc:,}")
+            val3, val4 = st.columns(2)
+            v_closing  = val3.number_input("Closing Costs ($)", min_value=0, value=3000, step=500, key="mw_dn_cls")
+            v_pct_lbl  = val4.radio("Buyer's %", ["60%", "65%", "70%"], index=1, horizontal=True, key="mw_dn_pct")
+            v_pct      = int(v_pct_lbl[:-1]) / 100
+
+            v_mao        = v_arv * v_pct - v_repairs - v_closing
+            buyer_margin = v_mao - fc_assign
+
+            vm1, vm2, vm3 = st.columns(3)
+            vm1.metric("Buyer's MAO",           fmt_currency(max(0, v_mao)))
+            vm2.metric("Your Assignment Price",  fmt_currency(fc_assign))
+            vm3.metric("Buyer's Margin",         fmt_currency(buyer_margin),
+                       delta="✅ Buyer makes money" if buyer_margin >= 0 else "❌ Over buyer's MAO",
+                       delta_color="normal" if buyer_margin >= 0 else "inverse")
+
             import pandas as pd
             _sc_data = []
             for _lbl, _pct in [("Conservative (60%)", 0.60), ("Standard (65%)", 0.65), ("Aggressive (70%)", 0.70)]:
-                _sc_mao = fc_arv * _pct - fc_repairs - fc_closing
+                _sc_mao = v_arv * _pct - v_repairs - v_closing
                 _sc_data.append({
-                    "Scenario":  _lbl,
-                    "Buyer MAO": fmt_currency(max(0, _sc_mao)),
-                    "Your Fee":  fmt_currency(_sc_mao - fc_offer),
-                    "Feasible":  "✅" if _sc_mao > fc_offer else "❌",
+                    "Scenario":       _lbl,
+                    "Buyer's MAO":    fmt_currency(max(0, _sc_mao)),
+                    "Buyer's Margin": fmt_currency(_sc_mao - fc_assign),
+                    "Buyer Buys?":    "✅" if _sc_mao >= fc_assign else "❌",
                 })
             st.dataframe(pd.DataFrame(_sc_data), use_container_width=True, hide_index=True)
-
-        if st.button("💾 Save Scenario", key="mw_dn_save", type="primary"):
-            execute("""
-                INSERT INTO offer_options
-                    (lead_id, scenario, arv, arv_pct, repair_cost, closing_costs,
-                     target_fee, offer_price, feasible, calc_date)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-            """, (lead_id,
-                  f"My Work {fc_pct_lbl}",
-                  fc_arv, int(fc_pct * 100), fc_repairs, fc_closing,
-                  max(0, int(fc_fee)), fc_offer, fc_fee > 0), commit=True)
-            st.success("Scenario saved to Offer Scenarios!")
-            st.rerun()
 
     # ── SELLER ────────────────────────────────────────────────────────────
     with t_seller:

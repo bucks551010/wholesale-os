@@ -113,9 +113,10 @@ with list_col:
                 lo, hi = REPAIR_RATES.get(cond, (28, 40))
                 _mkt = float(d["total_mkt_val"] or 0)
                 _arv = float(d["arv_estimate"] or _mkt * 1.15)
-                st.session_state["df_arv"]     = int(_arv)
-                st.session_state["df_repairs"] = int((lo + hi) / 2 * sqft)
-                st.session_state["df_offer"]   = int(_arv * 0.65 - (lo + hi) / 2 * sqft - 3000 - 10000)
+                st.session_state["df_arv"]      = int(_arv)
+                st.session_state["df_repairs"]  = int((lo + hi) / 2 * sqft)
+                st.session_state["df_contract"] = int(d["purchase_price"] or 0)
+                st.session_state["df_assign"]   = int(d.get("assignment_price") or 0)
                 st.rerun()
 
 # ── RIGHT: deal calculator ────────────────────────────────────────────────────
@@ -125,19 +126,15 @@ with calc_col:
     if not sel_lead_id:
         st.markdown("### 👈 Click any deal on the left to run your numbers")
         st.markdown("""
-**How the wholesale fee works:**
+**How your assignment fee works:**
 ```
-  ARV (after-repair value)               $200,000
-  × Buyer's standard % (65%)            ×    0.65
-  = Gross buyer offer                    $130,000
-  − Your repair estimate                 − $25,000
-  − Closing costs                        −  $3,000
-  ─────────────────────────────────────────────────
-  = Buyer's max offer to you            $102,000
-  − Your contract price with seller      − $85,000
-  ═════════════════════════════════════════════════
-  🏷️ YOUR ASSIGNMENT FEE                  $17,000
+  Your contract price with seller      $950,000
+  Your assignment price to buyer     $1,050,000
+  ═════════════════════════════════════════
+  🏷️ YOUR ASSIGNMENT FEE               $100,000
 ```
+Use the **Validate** expander below your calculator to
+check whether your assignment price is within the buyer's MAO.
 """)
         st.stop()
 
@@ -147,7 +144,7 @@ with calc_col:
                b.living_area, b.year_built, b.condition, b.bedrooms, b.full_baths,
                o.owner_name, o.is_absentee,
                l.motivated_score, l.id AS lead_id,
-               ad.id AS deal_id, ad.purchase_price, ad.assignment_fee_target
+               ad.id AS deal_id, ad.purchase_price, ad.assignment_fee_target, ad.assignment_price
         FROM leads l
         JOIN parcels p ON p.parcel_id = l.parcel_id
         LEFT JOIN buildings b ON b.parcel_id = p.parcel_id AND b.building_num = 1
@@ -167,9 +164,10 @@ with calc_col:
     lo, hi = REPAIR_RATES.get(cond, (28, 40))
 
     # Default pre-fills (from session_state set when they clicked)
-    def_arv     = st.session_state.get("df_arv",     int(float(p["total_mkt_val"]) * 1.15 if p["total_mkt_val"] else 100_000))
-    def_repairs = st.session_state.get("df_repairs", int((lo + hi) / 2 * sqft))
-    def_offer   = st.session_state.get("df_offer",   int(p["purchase_price"] or max(0, def_arv * 0.65 - def_repairs - 3000 - 10000)))
+    def_arv      = st.session_state.get("df_arv",      int(float(p["total_mkt_val"]) * 1.15 if p["total_mkt_val"] else 100_000))
+    def_repairs  = st.session_state.get("df_repairs",  int((lo + hi) / 2 * sqft))
+    def_contract = st.session_state.get("df_contract", int(p["purchase_price"] or 0))
+    def_assign   = st.session_state.get("df_assign",   int(p.get("assignment_price") or 0))
 
     # ── Property header ───────────────────────────────────────────────────
     st.subheader(p["full_address"] or p["parcel_id"])

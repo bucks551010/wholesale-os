@@ -145,49 +145,61 @@ st.divider()
 
 # ── Your Fee Calculator ───────────────────────────────────────────────────────
 st.markdown("### 🏷️ Your Assignment Fee Calculator")
-st.caption("Plug in your own numbers — override any field. Your fee updates instantly.")
+st.caption("Your fee = what your buyer pays you − what you pay the seller.")
 
-_repairs_mid = (repair["low"] + repair["high"]) / 2 if arv else 0
-_default_arv  = int(arv or prop["total_mkt_val"] or 0)
-_default_rep  = int(_repairs_mid)
+ap1, ap2 = st.columns(2)
+fee_contract = ap1.number_input(
+    "Your Contract Price (what you pay seller) ($)",
+    min_value=0, value=0, step=1000, key="fee_contract",
+)
+fee_assign = ap2.number_input(
+    "Your Assignment Price (what buyer pays you) ($)",
+    min_value=0, value=0, step=1000, key="fee_assign",
+)
 
-fc1, fc2, fc3 = st.columns(3)
-fc_arv     = fc1.number_input("ARV ($)",             min_value=0, value=_default_arv, step=1000, key="fee_arv")
-fc_repairs = fc2.number_input("Your Repair Est. ($)", min_value=0, value=_default_rep, step=500,  key="fee_rep",
-                               help=f"Benchmark: {fmt_currency(repair['low'])}–{fmt_currency(repair['high'])} for {cond} condition")
-fc_closing = fc3.number_input("Closing Costs ($)",    min_value=0, value=3_000,        step=250,  key="fee_cls")
-
-fc4, fc5 = st.columns(2)
-fc_buyer_pct = fc4.radio("Buyer's ARV %", [60, 65, 70], index=1, horizontal=True,
-                          format_func=lambda x: f"{x}%", key="fee_pct")
-fc_offer = fc5.number_input("Your Contract Price (offer to seller) ($)",
-                             min_value=0, value=max(0, int(_default_arv * 0.65 - _default_rep - 3000 - 10000)),
-                             step=500, key="fee_offer")
-
-_buyer_mao  = max(0, fc_arv * (fc_buyer_pct / 100) - fc_repairs - fc_closing)
-_fee        = _buyer_mao - fc_offer
-_feasible   = _fee > 0 and fc_offer > 0
+_fee = fee_assign - fee_contract
 
 with st.container(border=True):
-    rr1, rr2, rr3, rr4 = st.columns(4)
-    rr1.metric("ARV",                        fmt_currency(fc_arv))
-    rr2.metric(f"Buyer's MAO ({fc_buyer_pct}%)", fmt_currency(_buyer_mao))
-    rr3.metric("Your Contract Price",        fmt_currency(fc_offer))
-    rr4.metric("🏷️ YOUR ASSIGNMENT FEE",     fmt_currency(_fee),
-               delta="✅ Feasible" if _feasible else ("❌ Underwater" if fc_offer > 0 else "Enter your offer"),
-               delta_color="normal" if _feasible else "inverse")
+    rr1, rr2, rr3 = st.columns(3)
+    rr1.metric("Your Contract Price",    fmt_currency(fee_contract))
+    rr2.metric("Your Assignment Price",  fmt_currency(fee_assign))
+    rr3.metric("🏷️ YOUR ASSIGNMENT FEE", fmt_currency(_fee),
+               delta="✅ You profit" if _fee > 0 else ("❌ Negative" if fee_contract > 0 else "Enter your prices"),
+               delta_color="normal" if _fee > 0 else "inverse")
 
 if prop.get("lead_id") and st.button("💾 Save this Scenario", key="save_fee_scenario"):
     execute("""
         INSERT INTO offer_options
-            (lead_id, scenario, arv, arv_pct, repair_cost, closing_costs,
-             target_fee, offer_price, buyer_profit, feasible, calc_date)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_DATE)
-    """, (prop["lead_id"], f"{fc_buyer_pct}% custom scenario",
-          fc_arv, fc_buyer_pct, fc_repairs, fc_closing,
-          max(0, _fee), fc_offer,
-          fc_arv - fc_repairs - fc_closing - fc_offer, _feasible), commit=True)
+            (lead_id, scenario, offer_price, target_fee, feasible, calc_date)
+        VALUES (%s,%s,%s,%s,%s,CURRENT_DATE)
+    """, (prop["lead_id"],
+          f"Analysis: Contract ${fee_contract:,} → Assign ${fee_assign:,}",
+          fee_contract, max(0, _fee), _fee > 0), commit=True)
     st.success("Scenario saved!")
+
+with st.expander("🔍 Validate: Is your assignment price within the buyer's MAO?"):
+    st.caption("Cash buyers using the 65% rule won't pay more than ARV × % − repairs − closing.")
+    _repairs_mid = (repair["low"] + repair["high"]) / 2 if arv else 0
+    _default_arv  = int(arv or prop["total_mkt_val"] or 0)
+    _default_rep  = int(_repairs_mid)
+
+    fc1, fc2, fc3 = st.columns(3)
+    fc_arv     = fc1.number_input("ARV ($)",             min_value=0, value=_default_arv, step=1000, key="fee_arv")
+    fc_repairs = fc2.number_input("Repair Estimate ($)", min_value=0, value=_default_rep, step=500,  key="fee_rep",
+                                   help=f"Benchmark: {fmt_currency(repair['low'])}–{fmt_currency(repair['high'])} for {cond} condition")
+    fc_closing = fc3.number_input("Closing Costs ($)",   min_value=0, value=3_000, step=250, key="fee_cls")
+    fc_buyer_pct = st.radio("Buyer's ARV %", [60, 65, 70], index=1, horizontal=True,
+                              format_func=lambda x: f"{x}%", key="fee_pct")
+
+    _buyer_mao   = max(0, fc_arv * (fc_buyer_pct / 100) - fc_repairs - fc_closing)
+    buyer_margin = _buyer_mao - fee_assign
+
+    vm1, vm2, vm3 = st.columns(3)
+    vm1.metric("Buyer's MAO",           fmt_currency(_buyer_mao))
+    vm2.metric("Your Assignment Price", fmt_currency(fee_assign))
+    vm3.metric("Buyer's Margin",        fmt_currency(buyer_margin),
+               delta="✅ Buyer makes money" if buyer_margin >= 0 else "❌ Over buyer's MAO",
+               delta_color="normal" if buyer_margin >= 0 else "inverse")
 
 st.divider()
 
