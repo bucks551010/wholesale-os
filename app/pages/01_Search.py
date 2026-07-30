@@ -142,7 +142,9 @@ def show_property_card(row: dict):
     st.divider()
     a1, a2, a3 = st.columns(3)
     a1.button("➕ Add as Lead",       key=f"lead_{row['parcel_id']}")
-    a2.button("💰 Run Deal Analysis", key=f"deal_{row['parcel_id']}")
+    if a2.button("💰 Run Deal Analysis", key=f"deal_{row['parcel_id']}"):
+        st.session_state["analysis_parcel_id"] = row["parcel_id"]
+        st.switch_page("pages/04_Analysis.py")
     a3.button("📋 View Full History", key=f"hist_{row['parcel_id']}")
 
 
