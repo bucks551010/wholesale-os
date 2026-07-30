@@ -55,22 +55,34 @@ if not leads:
     st.info("No leads match the current filters.")
     st.stop()
 
-# ── Select leads to mail ──────────────────────────────────────────────────────
 st.subheader("Select Leads to Mail")
 
 not_yet_mailed = [r for r in leads if r["mail_status"] != "sent"]
-col_sel, col_all = st.columns([1, 3])
-select_all = col_sel.checkbox("Select all", value=True)
+
+btn_col1, btn_col2, _ = st.columns([1, 1, 6])
+if btn_col1.button("✅ Select All"):
+    for row in not_yet_mailed:
+        st.session_state[f"chk_{row['lead_id']}"] = True
+    st.rerun()
+if btn_col2.button("☐ Deselect All"):
+    for row in not_yet_mailed:
+        st.session_state[f"chk_{row['lead_id']}"] = False
+    st.rerun()
+
+# Init unset keys to False
+for row in not_yet_mailed:
+    if f"chk_{row['lead_id']}" not in st.session_state:
+        st.session_state[f"chk_{row['lead_id']}"] = False
 
 selected_ids: list[int] = []
 for row in not_yet_mailed:
-    default = select_all
+    key = f"chk_{row['lead_id']}"
     label = (
         f"Score {row['motivated_score']}  ·  "
-        f"{'👤 Absentee ' if row['is_absentee'] else ''}"
+        f"{'\U0001f464 Absentee ' if row['is_absentee'] else ''}"
         f"{row['owner_name']}  —  {row['full_address']}"
     )
-    if st.checkbox(label, value=default, key=f"chk_{row['lead_id']}"):
+    if st.checkbox(label, key=key):
         selected_ids.append(row["lead_id"])
 
 st.caption(f"{len(selected_ids)} selected")

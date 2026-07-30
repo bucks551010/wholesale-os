@@ -14,12 +14,14 @@ tab_list, tab_add, tab_match = st.tabs(["📋 Buyer List", "➕ Add Buyer", "�
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_list:
     buyers = execute("""
-        SELECT b.*, array_agg(bb.zip_codes) AS zips,
-               MIN(bb.min_price) AS min_price, MAX(bb.max_price) AS max_price
+        SELECT DISTINCT ON (b.id)
+            b.id, b.display_name, b.entity_name, b.entity_type,
+            b.phone, b.email, b.is_verified, b.deals_closed,
+            b.reliability_pct, b.notes,
+            bb.min_price, bb.max_price, bb.max_repairs, bb.zip_codes
         FROM cash_buyers b
         LEFT JOIN buyer_buyboxes bb ON bb.buyer_id = b.id
-        GROUP BY b.id
-        ORDER BY b.display_name
+        ORDER BY b.id, bb.id
     """)
 
     if not buyers:

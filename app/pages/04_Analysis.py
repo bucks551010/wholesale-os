@@ -97,23 +97,42 @@ st.divider()
 
 # ── MAO table ─────────────────────────────────────────────────────────────────
 st.markdown("### 📊 Maximum Allowable Offer (MAO)")
+st.caption(
+    "MAO = ARV × multiplier − avg repairs. "
+    "**Offer the seller at or below the 65% MAO.** "
+    "The gap between your contract price and a buyer's MAO is your assignment fee."
+)
 if arv:
     repairs_mid = (repair["low"] + repair["high"]) / 2
     mao = compute_mao(arv, repairs_mid)
 
-    cols = st.columns(len(STANDARD_MULTIPLIERS) + 1)
-    cols[0].metric("As-Is Value (HCAD)", fmt_currency(prop["total_mkt_val"]))
-    for i, (label, pct) in enumerate(STANDARD_MULTIPLIERS.items()):
-        spread = mao[label] - (float(prop["total_mkt_val"] or 0))
-        cols[i + 1].metric(
-            f"{label.title()} ({int(pct*100)}%)",
-            fmt_currency(mao[label]),
-            delta=f"Spread {fmt_currency(abs(spread))}" if spread > 0 else "Below current value",
+    c_arv, c_rep, c_con, c_std, c_agg = st.columns(5)
+    c_arv.metric("ARV (comps)", fmt_currency(arv),
+                 help=f"Trimmed mean of {arv_data['comp_count']} non-distressed comps in same ZIP")
+    c_rep.metric("Repairs (mid-est)", fmt_currency(repairs_mid),
+                 help=f"${repair['rate_low']}–{repair['rate_high']}/sqft × {repair['sqft']:,.0f} sqft ({cond})")
+    c_con.metric("Conservative 60%", fmt_currency(mao["conservative"]),
+                 help="Use if repairs may run high or market is soft")
+    c_std.metric("Standard 65%", fmt_currency(mao["standard"]),
+                 help="Your target offer price — typical wholesale formula")
+    c_agg.metric("Aggressive 70%", fmt_currency(mao["aggressive"]),
+                 help="Only if you have a confirmed end buyer already")
+
+    hcad_val = float(prop["total_mkt_val"] or 0)
+    gap = hcad_val - mao["standard"]
+    if gap > 0:
+        st.warning(
+            f"HCAD values this property at **{fmt_currency(hcad_val)}** — "
+            f"you need to negotiate **{fmt_currency(gap)} below** HCAD value "
+            f"to hit your standard MAO of {fmt_currency(mao['standard'])}."
+        )
+    else:
+        st.success(
+            f"HCAD values this property at **{fmt_currency(hcad_val)}** — "
+            f"**{fmt_currency(abs(gap))} below** your MAO. "
+            f"Potential assignment fee up to {fmt_currency(abs(gap))} at that price."
         )
 
-    st.caption(f"Formula: ARV × multiplier − avg repairs ({fmt_currency(repairs_mid)})")
-
-    # Save analysis
     if st.button("💾 Save Analysis to DB"):
         save_valuation(prop["parcel_id"], arv, arv_data["price_per_sqft"],
                        arv_data["comp_count"], arv_data["confidence"])

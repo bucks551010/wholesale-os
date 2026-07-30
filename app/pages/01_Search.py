@@ -149,10 +149,12 @@ def show_property_card(row: dict):
 
 
 # ── Search input (below all function definitions) ─────────────────────────────
+_prefill = st.session_state.pop("search_query", "")
 query = st.text_input(
     label="Search",
     placeholder='e.g.  "4521 Oak St"   or   "1234567890"   or   "James Williams"',
     label_visibility="collapsed",
+    value=_prefill,
 )
 
 if not query or len(query.strip()) < 3:

@@ -5,6 +5,59 @@ import streamlit as st
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 
+
+@st.dialog("📋 Property Log & Skip Trace")
+def contact_log_dialog(lead_id: int, parcel_id: str, address: str,
+                       owner_name: str, mail_city: str, mail_state: str):
+    st.subheader(address)
+
+    # Skip-trace links
+    name_enc = (owner_name or "").replace(" ", "+")
+    city_enc = (mail_city or "Houston").replace(" ", "+")
+    state    = mail_state or "TX"
+    st.markdown("**Free skip-trace links:**")
+    st.markdown(
+        f"[TruePeopleSearch ↗](https://www.truepeoplesearch.com/results?name={name_enc}&citystatezip={city_enc}%2C+{state})  ·  "
+        f"[FastPeopleSearch ↗](https://www.fastpeoplesearch.com/name/{name_enc})  ·  "
+        f"[WhitePages ↗](https://www.whitepages.com/name/{name_enc}/{city_enc})  ·  "
+        f"[HCAD Portal ↗](https://hcad.org/property-search/real-property/strap-search/?strap={parcel_id})"
+    )
+    st.divider()
+
+    # Existing contact log
+    history = execute(
+        "SELECT contact_date, method, outcome, notes, next_followup "
+        "FROM lead_contact_log WHERE lead_id=%s ORDER BY contact_date DESC",
+        (lead_id,)
+    )
+    if history:
+        st.markdown("**Previous contacts:**")
+        for h in history:
+            st.markdown(f"- {h['contact_date'].strftime('%Y-%m-%d')} · {h['method']} · {h['outcome'] or '—'}")
+            if h['notes']: st.caption(f"  {h['notes']}")
+        st.divider()
+
+    # Log new contact attempt
+    st.markdown("**Log a contact attempt:**")
+    with st.form("contact_form"):
+        r1, r2 = st.columns(2)
+        method   = r1.selectbox("Method", ["cold_call","text","email","door_knock","driving","letter_response","other"])
+        outcome  = r2.selectbox("Outcome", ["no_answer","left_voicemail","spoke_not_interested","spoke_interested","callback_requested","wrong_number","other"])
+        phone_found = st.text_input("Phone number found (add to notes)")
+        notes    = st.text_area("Notes", placeholder="What did you find out? Price they want? Motivation?")
+        followup = st.date_input("Follow-up date", value=None)
+        if st.form_submit_button("Save Contact Log", type="primary"):
+            full_notes = ((f"Phone: {phone_found}  " if phone_found else "") + (notes or "")).strip()
+            execute(
+                "INSERT INTO lead_contact_log "
+                "(lead_id, contact_date, method, outcome, notes, next_followup) "
+                "VALUES (%s, NOW(), %s, %s, %s, %s)",
+                (lead_id, method, outcome, full_notes or None, followup or None),
+                commit=True
+            )
+            st.success("Logged!")
+            st.rerun()
+
 st.set_page_config(page_title="Leads", page_icon="🎯", layout="wide")
 st.title("🎯 Distressed Property Leads")
 
@@ -156,10 +209,18 @@ for row in rows:
         c_.markdown(f"**Year Built:** {row['year_built'] or '—'}")
         c_.markdown(f"**Living Area:** {int(row['living_area']):,} sqft" if row['living_area'] else "**Living Area:** —")
 
-        col_v, col_p = st.columns(2)
-        col_v.page_link("pages/01_Search.py", label="🔍 Full Property Profile",
-                        help=f"Search for {row['full_address']}")
-        if col_p.button("➕ Add to Pipeline", key=f"pipe_{row['lead_id']}"):
+        col_v, col_p, col_c = st.columns(3)
+        if col_v.button("🔍 Full Profile", key=f"prof_{row['lead_id']}"):
+            st.session_state["search_query"] = row["parcel_id"]
+            st.switch_page("pages/01_Search.py")
+        if col_c.button("📋 Log / Skip-Trace", key=f"log_{row['lead_id']}"):
+            contact_log_dialog(
+                lead_id=row["lead_id"], parcel_id=row["parcel_id"],
+                address=row["full_address"] or row["parcel_id"],
+                owner_name=row["owner_name"] or "",
+                mail_city=row.get("situs_city", ""), mail_state="TX",
+            )
+        if col_p.button("➕ Pipeline", key=f"pipe_{row['lead_id']}"):
             existing = execute("SELECT id FROM active_deals WHERE lead_id = %s", (row["lead_id"],))
             if existing:
                 st.warning("Already in pipeline")
