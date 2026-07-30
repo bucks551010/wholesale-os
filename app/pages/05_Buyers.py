@@ -9,7 +9,11 @@ st.set_page_config(page_title="Cash Buyers", page_icon="💰", layout="wide")
 st.title("💰 Cash Buyer Database")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_list, tab_add, tab_match = st.tabs(["📋 Buyer List", "➕ Add Buyer", "🎯 Match Leads"])
+tab_list, tab_add, tab_mine, tab_csv, tab_clerk, tab_match = st.tabs([
+    "📋 Buyer List", "➕ Add Buyer",
+    "🏗️ Mine from HCAD", "📥 CSV Import", "🏛️ County Clerk Deeds",
+    "🎯 Match Leads",
+])
 
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_list:
@@ -104,8 +108,328 @@ with tab_add:
                 st.success(f"Added {display_name}!")
                 st.rerun()
 
+# ── MINE FROM HCAD ────────────────────────────────────────────────────────────
+HOMEBUILDER_KEYWORDS = [
+    "DR HORTON","M/I HOMES","M I HOMES","TOLL ","LENNAR","KB HOME","PULTE","MERITAGE",
+    "BEAZER","CENTEX","PERRY HOME","DAVID WEEKLEY","HIGHLAND HOME",
+    "COVENTRY HOME","NEWMARK HOME","TRENDMAKER","GEHAN HOME",
+]
+
+with tab_mine:
+    st.subheader("🏗️ Mine Cash Buyers from HCAD Data")
+    st.caption(
+        "These are LLCs, trusts, and corporations that own multiple Harris County "
+        "properties — highly likely to be active cash investors."
+    )
+
+    mc1, mc2, mc3 = st.columns(3)
+    mine_min_props  = mc1.slider("Min properties owned", 3, 50, 5)
+    mine_max_props  = mc2.slider("Max properties (exclude large builders)", 5, 500, 100)
+    mine_excl_build = mc3.checkbox("Exclude known homebuilders", value=True)
+    mine_types      = st.multiselect("Owner types", ["llc","trust","corporation","estate"],
+                                     default=["llc","trust","corporation"])
+
+    if st.button("🔍 Find Buyer Candidates", type="primary"):
+        candidates = execute("""
+            SELECT
+                o.owner_name,
+                o.owner_type,
+                o.mail_addr_1,
+                o.mail_city,
+                o.mail_state,
+                o.mail_zip,
+                COUNT(o.parcel_id) AS prop_count,
+                array_agg(DISTINCT p.situs_zip) FILTER (WHERE p.situs_zip IS NOT NULL) AS zips,
+                MIN(p.total_appr_val) AS min_val,
+                MAX(p.total_appr_val) AS max_val
+            FROM owners o
+            JOIN parcels p ON p.parcel_id = o.parcel_id
+            WHERE o.owner_type = ANY(%(types)s)
+            GROUP BY o.owner_name, o.owner_type, o.mail_addr_1, o.mail_city, o.mail_state, o.mail_zip
+            HAVING COUNT(o.parcel_id) BETWEEN %(mn)s AND %(mx)s
+            ORDER BY prop_count DESC
+            LIMIT 500
+        """, {"types": mine_types, "mn": mine_min_props, "mx": mine_max_props})
+
+        if mine_excl_build:
+            candidates = [
+                c for c in candidates
+                if not any(kw in (c["owner_name"] or "").upper() for kw in HOMEBUILDER_KEYWORDS)
+            ]
+
+        # Filter out already-imported names
+        existing = {r["display_name"].upper() for r in execute("SELECT display_name FROM cash_buyers")}
+        new_cands = [c for c in candidates if (c["owner_name"] or "").upper() not in existing]
+
+        st.session_state["mine_candidates"] = new_cands
+        st.session_state["mine_all_cands"]  = candidates
+        st.rerun()
+
+    if "mine_candidates" in st.session_state:
+        cands     = st.session_state["mine_candidates"]
+        all_cands = st.session_state["mine_all_cands"]
+        st.markdown(
+            f"**{len(all_cands):,} candidates found** · "
+            f"**{len(cands):,} not yet imported**"
+        )
+
+        if cands:
+            import pandas as pd
+            df = pd.DataFrame([{
+                "Name":        c["owner_name"],
+                "Type":        c["owner_type"],
+                "Props":       c["prop_count"],
+                "ZIPs":        ", ".join((c["zips"] or [])[:5]),
+                "Value Range": f"{fmt_currency(c['min_val'])} – {fmt_currency(c['max_val'])}",
+                "Mail City":   f"{c['mail_city'] or '—'}, {c['mail_state'] or ''}",
+            } for c in cands])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            if st.button(f"⬇️ Import All {len(cands):,} as Cash Buyers", type="primary"):
+                import uuid
+                added = 0
+                for c in cands:
+                    r = execute("""
+                        INSERT INTO cash_buyers
+                            (buyer_key, display_name, entity_name, entity_type,
+                             mailing_address, mailing_city, mailing_state, mailing_zip,
+                             is_verified, notes, last_updated)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,NOW())
+                        ON CONFLICT DO NOTHING RETURNING id
+                    """, (
+                        str(uuid.uuid4())[:8],
+                        c["owner_name"], c["owner_name"], c["owner_type"],
+                        c["mail_addr_1"], c["mail_city"], c["mail_state"], c["mail_zip"],
+                        f"HCAD-mined: {c['prop_count']} properties in Harris County",
+                    ), commit=True)
+                    if r:
+                        zips = c["zips"] if c["zips"] else None
+                        execute("""
+                            INSERT INTO buyer_buyboxes (buyer_id, min_price, max_price, zip_codes, last_updated)
+                            VALUES (%s,%s,%s,%s::text[],NOW())
+                        """, (r[0]["id"], c["min_val"] or 0, c["max_val"] or 999999, zips), commit=True)
+                        added += 1
+                st.success(f"Imported {added:,} buyers!")
+                del st.session_state["mine_candidates"]
+                del st.session_state["mine_all_cands"]
+                st.rerun()
+
+# ── CSV IMPORT ────────────────────────────────────────────────────────────────
+with tab_csv:
+    st.subheader("📥 Import Buyers from CSV")
+    st.caption("Accepts exports from PropStream, BatchLeads, ListSource, REIPro, or any custom CSV.")
+
+    uploaded = st.file_uploader("Upload buyer list CSV", type=["csv"])
+    if uploaded:
+        import csv as _csv, io, pandas as pd
+
+        content = uploaded.read().decode("utf-8-sig", errors="replace")
+        reader  = _csv.DictReader(io.StringIO(content))
+        raw     = list(reader)
+        if not raw:
+            st.error("CSV is empty.")
+        else:
+            st.caption(f"{len(raw):,} rows · columns: {', '.join(raw[0].keys())}")
+
+            col_names = list(raw[0].keys())
+            def best_match(candidates, cols):
+                for c in candidates:
+                    for col in cols:
+                        if c.lower() in col.lower():
+                            return col
+                return None
+
+            st.markdown("**Map your columns** (auto-detected where possible):")
+            f1, f2 = st.columns(2)
+            opt = ["(skip)"] + col_names
+            map_name    = f1.selectbox("Full Name / Company *", opt,
+                index=opt.index(best_match(["name","company","entity","owner"], col_names) or "(skip)"))
+            map_phone   = f1.selectbox("Phone", opt,
+                index=opt.index(best_match(["phone","cell","mobile"], col_names) or "(skip)"))
+            map_email   = f1.selectbox("Email", opt,
+                index=opt.index(best_match(["email","mail"], col_names) or "(skip)"))
+            map_city    = f2.selectbox("City", opt,
+                index=opt.index(best_match(["city"], col_names) or "(skip)"))
+            map_state   = f2.selectbox("State", opt,
+                index=opt.index(best_match(["state"], col_names) or "(skip)"))
+            map_zip     = f2.selectbox("ZIP", opt,
+                index=opt.index(best_match(["zip","postal"], col_names) or "(skip)"))
+            map_min     = f1.selectbox("Min Price", opt,
+                index=opt.index(best_match(["min","low","floor"], col_names) or "(skip)"))
+            map_max     = f2.selectbox("Max Price", opt,
+                index=opt.index(best_match(["max","high","ceil","top"], col_names) or "(skip)"))
+
+            def gv(row, col):
+                return row.get(col, "").strip() if col != "(skip)" else ""
+
+            def to_int(v):
+                try: return int("".join(c for c in v if c.isdigit() or c == ".").split(".")[0])
+                except: return None
+
+            if map_name == "(skip)":
+                st.warning("Name/Company column is required.")
+            else:
+                preview = pd.DataFrame([{
+                    "Name":  gv(r, map_name),
+                    "Phone": gv(r, map_phone),
+                    "Email": gv(r, map_email),
+                    "City":  gv(r, map_city),
+                    "ZIP":   gv(r, map_zip),
+                    "Min $": gv(r, map_min),
+                    "Max $": gv(r, map_max),
+                } for r in raw[:10]])
+                st.markdown("**Preview (first 10 rows):**")
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+
+                if st.button(f"⬇️ Import {len(raw):,} Buyers", type="primary"):
+                    import uuid
+                    added = skipped = 0
+                    existing = {r["display_name"].upper()
+                                for r in execute("SELECT display_name FROM cash_buyers")}
+                    for row in raw:
+                        name = gv(row, map_name)
+                        if not name or name.upper() in existing:
+                            skipped += 1
+                            continue
+                        r = execute("""
+                            INSERT INTO cash_buyers
+                                (buyer_key, display_name, entity_name, entity_type,
+                                 phone, email, mailing_city, mailing_state, mailing_zip,
+                                 is_verified, notes, last_updated)
+                            VALUES (%s,%s,%s,'individual',%s,%s,%s,%s,%s,FALSE,'CSV import',NOW())
+                            ON CONFLICT DO NOTHING RETURNING id
+                        """, (
+                            str(uuid.uuid4())[:8],
+                            name, name,
+                            gv(row, map_phone) or None,
+                            gv(row, map_email) or None,
+                            gv(row, map_city)  or None,
+                            gv(row, map_state) or None,
+                            gv(row, map_zip)   or None,
+                        ), commit=True)
+                        if r:
+                            min_p = to_int(gv(row, map_min))
+                            max_p = to_int(gv(row, map_max))
+                            zip_v = gv(row, map_zip)
+                            execute("""
+                                INSERT INTO buyer_buyboxes
+                                    (buyer_id, min_price, max_price, zip_codes, last_updated)
+                                VALUES (%s,%s,%s,%s::text[],NOW())
+                            """, (r[0]["id"], min_p, max_p,
+                                  [zip_v] if zip_v else None), commit=True)
+                            added += 1
+                        else:
+                            skipped += 1
+                    st.success(f"Imported {added:,} buyers · skipped {skipped:,} duplicates")
+                    st.rerun()
+
+# ── HARRIS COUNTY CLERK DEEDS ─────────────────────────────────────────────────
+with tab_clerk:
+    st.subheader("🏛️ Harris County Clerk — Cash Deed Buyers")
+    st.markdown("""
+Harris County Clerk publishes all recorded deeds at **[hcdistrictclerk.com](https://www.hcdistrictclerk.com)**.
+Cash buyers show up as **Warranty Deed** or **Special Warranty Deed** transactions with *no corresponding Deed of Trust*
+(which is the mortgage) recorded within 30 days.
+
+#### How to get the data (free):
+
+**Option A — HCAD bulk download** *(easiest)*
+1. Go to [download.hcad.org](https://download.hcad.org/data/CAMA/2026/)
+2. Download `real_acct.txt` — this contains `last_sale_dt`, `last_sale_price`, and grantee info for every property
+3. Drop the file here to parse and identify recent buyers:
+""")
+
+    deed_file = st.file_uploader("Upload real_acct.txt from HCAD", type=["txt","csv"], key="deed_upload")
+    if deed_file:
+        import csv as _csv, io, pandas as pd
+
+        st.info("Parsing real_acct.txt for recent sales (2023–2026)…")
+        content = deed_file.read().decode("cp1252", errors="replace")
+        reader  = _csv.DictReader(io.StringIO(content), delimiter="\t")
+        raw     = list(reader)
+        headers = [h.strip().lower() for h in raw[0].keys()] if raw else []
+        st.caption(f"Columns detected: {', '.join(headers[:20])}")
+
+        # Look for sale-related columns
+        sale_cols = [h for h in headers if any(k in h for k in ["sale","grant","deed","transfer"])]
+        st.caption(f"Sale-related columns: {', '.join(sale_cols) or 'none detected'}")
+
+        if sale_cols:
+            st.markdown("**Column mapping for deed buyer extraction:**")
+            col_opts = ["(skip)"] + headers
+            s1, s2, s3 = st.columns(3)
+            map_grantee  = s1.selectbox("Buyer (Grantee) Name",  col_opts)
+            map_sale_dt  = s2.selectbox("Sale Date",             col_opts)
+            map_sale_pr  = s3.selectbox("Sale Price",            col_opts)
+
+            if map_grantee != "(skip)" and st.button("🔍 Extract Cash Buyer Candidates from Deeds"):
+                from collections import defaultdict
+                buyers_found = defaultdict(lambda: {"count": 0, "total": 0, "dates": []})
+                for row in raw:
+                    name  = (row.get(map_grantee) or "").strip()
+                    price = row.get(map_sale_pr, "")
+                    date  = row.get(map_sale_dt, "")
+                    if not name or len(name) < 3: continue
+                    try: amt = int("".join(c for c in price if c.isdigit()))
+                    except: amt = 0
+                    if amt < 10_000: continue
+                    buyers_found[name]["count"]  += 1
+                    buyers_found[name]["total"]  += amt
+                    buyers_found[name]["dates"].append(date)
+
+                # Rank by purchase frequency
+                ranked = sorted(
+                    [(k, v) for k, v in buyers_found.items() if v["count"] >= 2],
+                    key=lambda x: x[1]["count"], reverse=True
+                )[:500]
+
+                if ranked:
+                    df = pd.DataFrame([{
+                        "Buyer Name":     name,
+                        "Purchases":      v["count"],
+                        "Total Spent":    fmt_currency(v["total"]),
+                        "Avg Price":      fmt_currency(v["total"] // v["count"]),
+                    } for name, v in ranked])
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    st.session_state["deed_buyers"] = ranked
+                else:
+                    st.warning("No repeat buyers found. Check column mapping.")
+
+        if "deed_buyers" in st.session_state and st.button("⬇️ Import Deed Buyers to Database"):
+            import uuid
+            existing = {r["display_name"].upper() for r in execute("SELECT display_name FROM cash_buyers")}
+            added = 0
+            for name, v in st.session_state["deed_buyers"]:
+                if name.upper() in existing: continue
+                r = execute("""
+                    INSERT INTO cash_buyers
+                        (buyer_key, display_name, entity_name, entity_type,
+                         is_verified, notes, last_updated)
+                    VALUES (%s,%s,%s,'individual',FALSE,%s,NOW())
+                    ON CONFLICT DO NOTHING RETURNING id
+                """, (
+                    str(uuid.uuid4())[:8], name, name,
+                    f"County Clerk deed records: {v['count']} purchases, {fmt_currency(v['total'])} total",
+                ), commit=True)
+                if r: added += 1
+            st.success(f"Imported {added:,} deed buyers!")
+            del st.session_state["deed_buyers"]
+            st.rerun()
+
+    st.markdown("""
+---
+**Option B — Direct County Clerk search**
+1. Visit [hcdistrictclerk.com/Applications/WebSearch/RP.aspx](https://www.hcdistrictclerk.com/Applications/WebSearch/RP.aspx)
+2. Search by date range for "Warranty Deed" instrument type
+3. Export results to CSV and use the **📥 CSV Import** tab above
+
+**Option C — PropStream / BatchLeads** *(fastest)*
+- Filter: Harris County · Sold in last 12 months · Cash transaction · Entity type = LLC/Trust
+- Export CSV → use **📥 CSV Import** tab above
+""")
+
 # ─────────────────────────────────────────────────────────────────────────────
-with tab_match:
+
     st.subheader("Match Leads to Buyers")
     buyers_for_match = execute("SELECT id, display_name FROM cash_buyers ORDER BY display_name")
 
