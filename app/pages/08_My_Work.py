@@ -73,30 +73,53 @@ with left_col:
     with st.expander("➕ Add a Property to Work On"):
         addr_q = st.text_input("Search by address or ZIP", key="mw_addr_q", placeholder="e.g. 4521 Elm or 77051")
         if addr_q and len(addr_q) >= 3:
+            # Search all parcels (same as Search page), not just pre-scored leads
             hits = execute("""
-                SELECT l.id AS lead_id, p.full_address, p.situs_zip,
-                       l.motivated_score, p.total_mkt_val
-                FROM leads l
-                JOIN parcels p ON p.parcel_id = l.parcel_id
-                WHERE p.full_address ILIKE %s
-                  AND NOT EXISTS (
-                      SELECT 1 FROM active_deals ad2 WHERE ad2.lead_id = l.id AND ad2.status != 'dead'
-                  )
-                ORDER BY l.motivated_score DESC
-                LIMIT 12
-            """, (f"%{addr_q}%",))
+                SELECT p.parcel_id, p.full_address, p.situs_zip, p.total_mkt_val,
+                       l.id AS lead_id, COALESCE(l.motivated_score, 0) AS motivated_score,
+                       o.owner_name
+                FROM parcels p
+                LEFT JOIN leads l ON l.parcel_id = p.parcel_id
+                LEFT JOIN owners o ON o.parcel_id = p.parcel_id
+                WHERE UPPER(p.full_address) ILIKE %s
+                   OR p.parcel_id = %s
+                   OR UPPER(o.owner_name) ILIKE %s
+                ORDER BY l.motivated_score DESC NULLS LAST
+                LIMIT 15
+            """, (f"%{addr_q.upper()}%", addr_q.strip(), f"%{addr_q.upper()}%"))
             if not hits:
-                st.caption("No unsaved leads found.")
+                st.caption("No properties found. Try a partial street name, parcel ID, or owner name.")
             for h in hits:
-                label = f"{h['full_address'][:36]}  |  Score {h['motivated_score']}"
-                if st.button(label, key=f"mw_hit_{h['lead_id']}", use_container_width=True):
-                    res = execute(
-                        "INSERT INTO active_deals (lead_id, status, created_at) VALUES (%s,'new_lead',NOW()) RETURNING id",
-                        (h["lead_id"],), commit=True
-                    )
-                    if res:
-                        st.session_state["mw_deal_id"] = res[0]["id"]
+                already = execute(
+                    "SELECT ad.id FROM active_deals ad JOIN leads l ON l.id=ad.lead_id "
+                    "WHERE l.parcel_id=%s AND ad.status!='dead' LIMIT 1",
+                    (h["parcel_id"],)
+                )
+                badge = " ✅ already saved" if already else ""
+                label = f"{h['full_address'][:42]}  |  {h['owner_name'] or ''}  |  Score {h['motivated_score']}{badge}"
+                if st.button(label, key=f"mw_hit_{h['parcel_id']}", use_container_width=True):
+                    if already:
+                        st.session_state["mw_deal_id"] = already[0]["id"]
                         st.rerun()
+                    else:
+                        # Create lead if not scored yet
+                        lead_id = h["lead_id"]
+                        if not lead_id:
+                            r_lead = execute(
+                                "INSERT INTO leads (parcel_id, source, date_added, motivated_score, status, priority) "
+                                "VALUES (%s,'manual',NOW(),0,'new_lead','low') RETURNING id",
+                                (h["parcel_id"],), commit=True
+                            )
+                            lead_id = r_lead[0]["id"] if r_lead else None
+                        if lead_id:
+                            res = execute(
+                                "INSERT INTO active_deals (lead_id, status, created_at) VALUES (%s,'new_lead',NOW()) RETURNING id",
+                                (lead_id,), commit=True
+                            )
+                            if res:
+                                st.session_state["mw_deal_id"] = res[0]["id"]
+                                st.rerun()
+
 
 # ── RIGHT PANEL: workspace ────────────────────────────────────────────────────
 with right_col:
