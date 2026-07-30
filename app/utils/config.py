@@ -8,7 +8,7 @@ TARGET_ZIPS: list[str] = [
 ]
 
 HCAD_DATA_DIR: str = os.getenv("HCAD_DATA_DIR", "./data/hcad")
-HCAD_YEAR: int = int(os.getenv("HCAD_YEAR", "2025"))
+HCAD_YEAR: int = int(os.getenv("HCAD_YEAR", "2026"))
 
 APP_TITLE: str = os.getenv("APP_TITLE", "WholesaleOS")
 DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"

@@ -26,10 +26,16 @@ from pathlib import Path
 import requests
 from tqdm import tqdm
 
+csv.field_size_limit(10_000_000)  # HCAD notes column can exceed default 131KB limit
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from app.utils.config import HCAD_DATA_DIR, HCAD_YEAR, TARGET_ZIPS
+from app.utils.config import HCAD_DATA_DIR as _HCAD_DATA_DIR, HCAD_YEAR, TARGET_ZIPS
 from app.utils.db import db_cursor, execute
+
+# Resolve data dir relative to project root, not CWD
+_PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HCAD_DATA_DIR = Path(_HCAD_DATA_DIR) if Path(_HCAD_DATA_DIR).is_absolute() else _PROJECT_ROOT / _HCAD_DATA_DIR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,12 +45,12 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # HCAD data download base URL
-HCAD_BASE_URL = "https://pdata.hcad.org/download"
+HCAD_BASE_URL = "https://download.hcad.org/data/CAMA"
 
 # Files we need and their download paths
 HCAD_FILES = {
     "real_acct":    f"{HCAD_BASE_URL}/{HCAD_YEAR}/Real_acct_owner.zip",
-    "building_res": f"{HCAD_BASE_URL}/{HCAD_YEAR}/building_res.zip",
+    "building_res": f"{HCAD_BASE_URL}/{HCAD_YEAR}/Real_building_land.zip",
 }
 
 # Column mappings — HCAD uses fixed column order (no headers in some files)
@@ -128,8 +134,8 @@ def safe_int(val: str):
         return None
 
 
-def parse_txt_file(file_path: Path, col_names: list[str], delimiter="|") -> list[dict]:
-    """Parse a HCAD pipe-delimited file, auto-detecting header vs fixed-column."""
+def parse_txt_file(file_path: Path, col_names: list[str], delimiter: str | None = None) -> list[dict]:
+    """Parse a HCAD txt file, auto-detecting tab vs pipe delimiter and header row."""
     rows = []
     encodings = ["cp1252", "utf-8", "latin-1"]
 
@@ -137,15 +143,23 @@ def parse_txt_file(file_path: Path, col_names: list[str], delimiter="|") -> list
         try:
             with open(file_path, "r", encoding=enc, errors="replace") as f:
                 first_line = f.readline()
-                # Detect if first line is a header (contains non-numeric first field)
-                first_field = first_line.split(delimiter)[0].strip()
+                # Auto-detect delimiter: count tabs vs pipes in the first line
+                if delimiter is None:
+                    tab_count = first_line.count("\t")
+                    pipe_count = first_line.count("|")
+                    detected = "\t" if tab_count >= pipe_count else "|"
+                else:
+                    detected = delimiter
+
+                # Detect if first line is a header (non-numeric first field)
+                first_field = first_line.split(detected)[0].strip()
                 has_header = not first_field.isdigit()
                 f.seek(0)
 
-                reader = csv.reader(f, delimiter=delimiter)
+                reader = csv.reader(f, delimiter=detected)
                 if has_header:
                     headers = [h.strip().lower() for h in next(reader)]
-                    col_names = headers  # use actual headers when present
+                    col_names = headers  # use actual headers from the file
 
                 for line in reader:
                     if len(line) < 2:
@@ -167,8 +181,18 @@ def parse_txt_file(file_path: Path, col_names: list[str], delimiter="|") -> list
 # ──────────────────────────────────────────────────────────
 
 def import_real_acct(rows: list[dict], target_zips: set[str]) -> tuple[int, int]:
-    """Upsert parcels from real_acct data, filtered to target ZIPs."""
-    filtered = [r for r in rows if r.get("situs_zip", "")[:5] in target_zips]
+    """Upsert parcels from real_acct data, filtered to target ZIPs.
+
+    Actual real_acct.txt column names (tab-delimited, has header row):
+      acct, yr, mailto, mail_addr_1, mail_addr_2, mail_city, mail_state,
+      mail_zip, mail_country, undeliverable, str_pfx, str_num, str_num_sfx,
+      str (street name), str_sfx, str_sfx_dir, str_unit,
+      site_addr_1, site_addr_2 (city), site_addr_3 (zip),
+      state_class (acct_type), ...,
+      land_val, bld_val (improvement), ..., assessed_val, tot_appr_val, tot_mkt_val
+    """
+    # site_addr_3 holds the 5-digit situs ZIP
+    filtered = [r for r in rows if r.get("site_addr_3", "")[:5] in target_zips]
     log.info(f"  Filtered to {len(filtered):,} parcels in target ZIPs (from {len(rows):,} total)")
 
     inserted = updated = 0
@@ -176,23 +200,24 @@ def import_real_acct(rows: list[dict], target_zips: set[str]) -> tuple[int, int]
 
     for r in filtered:
         situs_street = " ".join(filter(None, [
-            r.get("situs_street_pfx", ""),
-            r.get("situs_street", ""),
-            r.get("situs_street_sfx", ""),
+            r.get("str_pfx", ""),
+            r.get("str", ""),       # street name column is literally 'str'
+            r.get("str_sfx", ""),
+            r.get("str_sfx_dir", ""),
         ])).strip()
 
         batch.append({
             "parcel_id":       r.get("acct", "").strip(),
-            "situs_num":       r.get("situs_num", "").strip() or None,
-            "situs_street":    situs_street or None,
-            "situs_city":      r.get("situs_city", "").strip() or "HOUSTON",
-            "situs_state":     r.get("situs_state", "TX").strip() or "TX",
-            "situs_zip":       r.get("situs_zip", "")[:5].strip() or None,
-            "acct_type":       r.get("acct_type", "").strip() or None,
+            "situs_num":       r.get("str_num", "").strip() or None,
+            "situs_street":    situs_street or r.get("site_addr_1", "").strip() or None,
+            "situs_city":      r.get("site_addr_2", "").strip() or "HOUSTON",
+            "situs_state":     "TX",
+            "situs_zip":       r.get("site_addr_3", "")[:5].strip() or None,
+            "acct_type":       r.get("state_class", "").strip() or None,
             "land_val":        safe_numeric(r.get("land_val", "")),
-            "improvement_val": safe_numeric(r.get("improvement_val", "")),
-            "total_appr_val":  safe_numeric(r.get("total_appr_val", "")),
-            "total_mkt_val":   safe_numeric(r.get("total_mkt_val", "")),
+            "improvement_val": safe_numeric(r.get("bld_val", "")),
+            "total_appr_val":  safe_numeric(r.get("tot_appr_val", "")),
+            "total_mkt_val":   safe_numeric(r.get("tot_mkt_val", "")),
             "assessed_val":    safe_numeric(r.get("assessed_val", "")),
             "hcad_year":       safe_int(r.get("yr", str(HCAD_YEAR))),
         })
@@ -242,25 +267,44 @@ def _upsert_parcels(batch: list[dict]) -> tuple[int, int]:
         return len(batch), 0
 
 
-def import_owners(rows: list[dict], target_parcel_ids: set[str]) -> int:
-    """Upsert owner records for parcels we already imported."""
-    filtered = [r for r in rows if r.get("acct", "").strip() in target_parcel_ids]
+def import_owners(
+    rows: list[dict],
+    target_parcel_ids: set[str],
+    mail_info: dict[str, dict] | None = None,
+) -> int:
+    """Upsert owner records from owners.txt (ln_num==1 primary owners).
+
+    owners.txt columns: acct, ln_num, name, aka, pct_own
+    mail_info: dict of acct -> {mail_addr_1, mail_addr_2, mail_city, mail_state, mail_zip}
+               built from real_acct.txt mail fields.
+    """
+    if mail_info is None:
+        mail_info = {}
+
+    # Keep only primary owners (ln_num == 1) for our target parcels
+    filtered = [
+        r for r in rows
+        if r.get("acct", "").strip() in target_parcel_ids
+        and r.get("ln_num", "1").strip() in ("1", "")
+    ]
     log.info(f"  Owner records for our parcels: {len(filtered):,}")
 
     batch = []
     for r in filtered:
-        name = r.get("owner_name", "").strip()
+        acct = r.get("acct", "").strip()
+        name = (r.get("name", "") or r.get("owner_name", "")).strip()
+        mail = mail_info.get(acct, {})
         batch.append({
-            "parcel_id":    r.get("acct", "").strip(),
+            "parcel_id":    acct,
             "owner_name":   name or None,
-            "owner_name_2": r.get("owner_name_2", "").strip() or None,
+            "owner_name_2": (r.get("aka", "") or r.get("owner_name_2", "")).strip() or None,
             "owner_type":   _classify_owner(name),
-            "mail_addr_1":  r.get("mail_addr_1", "").strip() or None,
-            "mail_addr_2":  r.get("mail_addr_2", "").strip() or None,
-            "mail_city":    r.get("mail_city", "").strip() or None,
-            "mail_state":   r.get("mail_state", "").strip() or None,
-            "mail_zip":     r.get("mail_zip", "")[:5].strip() or None,
-            "mail_country": r.get("mail_country", "US").strip() or "US",
+            "mail_addr_1":  mail.get("mail_addr_1", "") or None,
+            "mail_addr_2":  mail.get("mail_addr_2", "") or None,
+            "mail_city":    mail.get("mail_city", "") or None,
+            "mail_state":   mail.get("mail_state", "") or None,
+            "mail_zip":     (mail.get("mail_zip", "") or "")[:5] or None,
+            "mail_country": "US",
         })
 
         if len(batch) >= 500:
@@ -317,7 +361,16 @@ def _upsert_owners(batch: list[dict]):
 
 
 def import_buildings(rows: list[dict], target_parcel_ids: set[str]) -> int:
-    """Upsert building records for our parcels."""
+    """Upsert building records for our parcels.
+
+    building_res.txt columns (tab-delimited, has header):
+      acct, property_use_cd, bld_num, impr_tp, impr_mdl_cd,
+      structure, structure_dscr, dpr_val, cama_replacement_cost,
+      accrued_depr_pct, qa_cd, dscr (condition), date_erected (year),
+      eff, yr_remodel, yr_roll, appr_by, appr_dt, notes,
+      im_sq_ft, act_ar, heat_ar (living area), gross_ar, eff_ar,
+      base_ar, perimeter, pct, bld_adj, rcnld, size_index, lump_sum_adj
+    """
     filtered = [r for r in rows if r.get("acct", "").strip() in target_parcel_ids]
     log.info(f"  Building records for our parcels: {len(filtered):,}")
 
@@ -335,18 +388,20 @@ def import_buildings(rows: list[dict], target_parcel_ids: set[str]) -> int:
     """
     batch = []
     for r in filtered:
+        # date_erected is a 4-digit year string (e.g. "2019") in this file
+        yr = safe_int(r.get("date_erected", "") or r.get("eff", ""))
         batch.append({
-            "parcel_id":     r.get("acct", "").strip(),
-            "building_num":  safe_int(r.get("bld_num", "1")) or 1,
-            "living_area":   safe_numeric(r.get("living_area", "") or r.get("bld_ar", "")),
-            "year_built":    safe_int(r.get("yr_impr", "")),
-            "bedrooms":      safe_int(r.get("bed_rms", "")),
-            "full_baths":    safe_int(r.get("full_baths", "")),
-            "half_baths":    safe_int(r.get("half_baths", "")),
-            "building_class": r.get("bld_class", "").strip() or None,
-            "condition":     r.get("condition_code", "").strip() or None,
-            "stories":       safe_numeric(r.get("stories", "")),
-            "pool_flag":     r.get("pool", "").strip().upper() in ("Y", "YES", "1"),
+            "parcel_id":      r.get("acct", "").strip(),
+            "building_num":   safe_int(r.get("bld_num", "1")) or 1,
+            "living_area":    safe_numeric(r.get("heat_ar", "") or r.get("act_ar", "")),
+            "year_built":     yr if yr and yr > 1800 else None,
+            "bedrooms":       None,   # not in building_res.txt
+            "full_baths":     None,   # not in building_res.txt
+            "half_baths":     None,   # not in building_res.txt
+            "building_class": r.get("property_use_cd", "").strip() or r.get("structure_dscr", "").strip() or None,
+            "condition":      r.get("dscr", "").strip() or None,
+            "stories":        None,   # not in building_res.txt
+            "pool_flag":      False,  # not in building_res.txt
         })
 
         if len(batch) >= 500:
@@ -400,20 +455,20 @@ def run(local_only: bool = False):
     log.info(f"Target ZIPs: {sorted(zip_set)}")
 
     data_dir = Path(HCAD_DATA_DIR)
-    data_dir.mkdir(parents=True, exist_ok=True)
 
     log_id = log_start("ingest_hcad")
     total_parcels = total_owners = total_buildings = 0
 
     try:
         # ── Step 1: Get / locate data files ──────────────────
+        data_dir.mkdir(parents=True, exist_ok=True)
         real_acct_path = _resolve_file(data_dir, "real_acct.txt", HCAD_FILES["real_acct"], local_only)
-        owner_path     = _resolve_file(data_dir, "owner.txt", HCAD_FILES["real_acct"], local_only)
+        owner_path     = _resolve_file(data_dir, "owners.txt", HCAD_FILES["real_acct"], local_only)
         bldg_path      = _resolve_file(data_dir, "building_res.txt", HCAD_FILES["building_res"], local_only)
 
         # ── Step 2: Import parcels ────────────────────────────
         log.info("Parsing real_acct.txt...")
-        acct_rows = parse_txt_file(real_acct_path, REAL_ACCT_COLS)
+        acct_rows = parse_txt_file(real_acct_path, [])
         ins, upd = import_real_acct(acct_rows, zip_set)
         total_parcels = ins + upd
         log.info(f"  Parcels: {total_parcels:,} processed")
@@ -423,18 +478,31 @@ def run(local_only: bool = False):
         imported_ids = {r["parcel_id"] for r in result}
         log.info(f"  Total parcels in DB for our ZIPs: {len(imported_ids):,}")
 
+        # Build mail_info dict from real_acct rows (owner mailing address)
+        mail_info = {
+            r["acct"].strip(): {
+                "mail_addr_1": r.get("mail_addr_1", ""),
+                "mail_addr_2": r.get("mail_addr_2", ""),
+                "mail_city":   r.get("mail_city", ""),
+                "mail_state":  r.get("mail_state", ""),
+                "mail_zip":    r.get("mail_zip", "")[:5],
+            }
+            for r in acct_rows
+            if r.get("acct", "").strip() in imported_ids
+        }
+
         # ── Step 3: Import owners ─────────────────────────────
         if owner_path and owner_path.exists():
-            log.info("Parsing owner.txt...")
-            owner_rows = parse_txt_file(owner_path, OWNER_COLS)
-            total_owners = import_owners(owner_rows, imported_ids)
+            log.info("Parsing owners.txt...")
+            owner_rows = parse_txt_file(owner_path, [])
+            total_owners = import_owners(owner_rows, imported_ids, mail_info)
         else:
-            log.warning("owner.txt not found — skipping owner import")
+            log.warning("owners.txt not found — skipping owner import")
 
         # ── Step 4: Import buildings ──────────────────────────
         if bldg_path and bldg_path.exists():
             log.info("Parsing building_res.txt...")
-            bldg_rows = parse_txt_file(bldg_path, BUILDING_RES_COLS)
+            bldg_rows = parse_txt_file(bldg_path, [])
             total_buildings = import_buildings(bldg_rows, imported_ids)
         else:
             log.warning("building_res.txt not found — skipping building import")
