@@ -252,6 +252,12 @@ with tab_mine:
             f"**{len(cands):,} not yet imported**"
         )
 
+        if not all_cands:
+            st.warning("No results. Try lowering the min-properties slider or expanding owner types.")
+        elif not cands:
+            st.success("✅ All candidates from this search are already in your buyer database!")
+            st.caption("Try raising the min-properties slider or changing ZIPs to find new investors.")
+
         if cands:
             import pandas as pd
             df = pd.DataFrame([{
@@ -430,10 +436,16 @@ Cash buyers show up as **Warranty Deed** or **Special Warranty Deed** transactio
         st.caption(f"Columns detected: {', '.join(headers[:20])}")
 
         # Look for sale-related columns
-        sale_cols = [h for h in headers if any(k in h for k in ["sale","grant","deed","transfer"])]
+        sale_cols = [h for h in headers if any(k in h for k in ["sale","grant","deed","transfer","price","amount","value"])]
         st.caption(f"Sale-related columns: {', '.join(sale_cols) or 'none detected'}")
 
-        if sale_cols:
+        if not headers:
+            st.error("Could not parse columns from this file. Make sure it is tab-separated.")
+        elif not sale_cols:
+            st.warning("No sale/deed columns detected. Map them manually below.")
+            sale_cols = headers  # fall through to mapping UI
+
+        if headers:
             st.markdown("**Column mapping for deed buyer extraction:**")
             col_opts = ["(skip)"] + headers
             s1, s2, s3 = st.columns(3)
@@ -540,36 +552,42 @@ with tab_skip:
             LIMIT %s
         """, (int(enrich_start_id), enrich_limit))
 
-        found_n = 0
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            ctx     = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                viewport={"width": 1280, "height": 800},
-            )
-            page = ctx.new_page()
-            for i, b in enumerate(buyers_to_enrich):
-                status.text(f"[{i+1}/{len(buyers_to_enrich)}] {b['display_name']}")
-                info       = scrape_google_maps(page, b["display_name"])
-                phone      = clean_phone(info.get("phone", ""))
-                website    = extract_url(info.get("website", ""))
-                found_name = info.get("found_name", "").strip()
-                if phone or website:
-                    execute("""
-                        INSERT INTO buyer_contacts
-                            (buyer_id, full_name, phone, notes, is_primary, last_updated)
-                        VALUES (%s,%s,%s,%s,TRUE,NOW())
-                        ON CONFLICT DO NOTHING
-                    """, (b["id"], found_name or b["display_name"], phone or None,
-                          f"Google Maps auto-enrich · website: {website}" if website else "Google Maps auto-enrich"
-                          ), commit=True)
-                    found_n += 1
-                import time as _t; _t.sleep(2)
-                progress.progress((i + 1) / len(buyers_to_enrich))
-            ctx.close(); browser.close()
+        if not buyers_to_enrich:
+            st.warning("All buyers already have contacts — nothing to enrich!")
+        else:
+            found_n = 0
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.launch(headless=True)
+                    ctx     = browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        viewport={"width": 1280, "height": 800},
+                    )
+                    page = ctx.new_page()
+                    total_n = len(buyers_to_enrich)
+                    for i, b in enumerate(buyers_to_enrich):
+                        status.text(f"[{i+1}/{total_n}] {b['display_name']}")
+                        info       = scrape_google_maps(page, b["display_name"])
+                        phone      = clean_phone(info.get("phone", ""))
+                        website    = extract_url(info.get("website", ""))
+                        found_name = info.get("found_name", "").strip()
+                        if phone or website:
+                            execute("""
+                                INSERT INTO buyer_contacts
+                                    (buyer_id, full_name, phone, notes, is_primary, last_updated)
+                                VALUES (%s,%s,%s,%s,TRUE,NOW())
+                            """, (b["id"], found_name or b["display_name"], phone or None,
+                                  f"Google Maps auto-enrich · website: {website}" if website else "Google Maps auto-enrich"
+                                  ), commit=True)
+                            found_n += 1
+                        import time as _t; _t.sleep(2)
+                        progress.progress((i + 1) / total_n)
+                    ctx.close(); browser.close()
+            except Exception as _enrich_err:
+                st.error(f"Enrichment error: {_enrich_err}")
 
-        st.success(f"Done — {found_n} of {len(buyers_to_enrich)} buyers enriched with phone/website")
-        st.rerun()
+            st.success(f"Done — {found_n} of {total_n} buyers enriched with phone/website")
+            st.rerun()
 
     st.divider()
     st.subheader("📤 Export for Skip Tracing")
@@ -681,14 +699,22 @@ with tab_skip:
 # ── MATCH LEADS ──────────────────────────────────────────────────────────────
 with tab_match:
     st.subheader("🎯 Match Leads to Buyers")
-    buyers_for_match = execute("SELECT id, display_name FROM cash_buyers ORDER BY display_name")
+
+    match_filter = st.text_input("🔍 Filter buyers", placeholder="Type name to narrow list…", key="match_filter")
+    buyers_for_match = execute(
+        "SELECT id, display_name FROM cash_buyers WHERE display_name ILIKE %s ORDER BY display_name LIMIT 200"
+        if match_filter else
+        "SELECT id, display_name FROM cash_buyers ORDER BY display_name LIMIT 200",
+        (f"%{match_filter}%",) if match_filter else None,
+    )
 
     if not buyers_for_match:
-        st.info("Add buyers first.")
+        st.info("No buyers match your filter — try a different name, or add buyers first.")
     else:
+        buyer_lookup = {b["id"]: b["display_name"] for b in buyers_for_match}
         sel_buyer = st.selectbox("Select Buyer",
-                                 options=[b["id"] for b in buyers_for_match],
-                                 format_func=lambda i: next(b["display_name"] for b in buyers_for_match if b["id"] == i))
+                                 options=list(buyer_lookup.keys()),
+                                 format_func=lambda i: buyer_lookup.get(i, str(i)))
 
         buybox = execute("""
             SELECT min_price, max_price, max_repairs, zip_codes

@@ -117,7 +117,6 @@ def run(limit=50, start_id=0, dry_run=False):
                         INSERT INTO buyer_contacts
                             (buyer_id, full_name, phone, notes, is_primary, last_updated)
                         VALUES (%s, %s, %s, %s, TRUE, NOW())
-                        ON CONFLICT DO NOTHING
                     """, (
                         b["id"],
                         found_name or name,
