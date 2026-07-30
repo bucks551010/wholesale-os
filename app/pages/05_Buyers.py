@@ -18,6 +18,7 @@ with tab_list:
             b.id, b.display_name, b.entity_name, b.entity_type,
             b.phone, b.email, b.is_verified, b.deals_closed,
             b.reliability_pct, b.notes,
+            b.mailing_city, b.mailing_state,
             bb.min_price, bb.max_price, bb.max_repairs, bb.zip_codes
         FROM cash_buyers b
         LEFT JOIN buyer_buyboxes bb ON bb.buyer_id = b.id
@@ -93,12 +94,13 @@ with tab_add:
             if result:
                 buyer_id = result[0]["id"]
                 zips = [z.strip() for z in zip_input.split(",") if z.strip()]
+                import psycopg2.extras
                 execute("""
                     INSERT INTO buyer_buyboxes
                         (buyer_id, min_price, max_price, max_repairs, zip_codes, last_updated)
-                    VALUES (%s,%s,%s,%s,%s,NOW())
+                    VALUES (%s,%s,%s,%s,%s::text[],NOW())
                 """, (buyer_id, min_price, max_price, max_repairs,
-                      zips or None), commit=True)
+                      zips if zips else None), commit=True)
                 st.success(f"Added {display_name}!")
                 st.rerun()
 
