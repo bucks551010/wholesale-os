@@ -61,27 +61,117 @@ def contact_log_dialog(lead_id: int, parcel_id: str, address: str,
 st.set_page_config(page_title="Leads", page_icon="🎯", layout="wide")
 st.title("🎯 Distressed Property Leads")
 
-# ── Sidebar filters ──────────────────────────────────────────────────────────
+# ── Value ranges (loaded once for slider bounds) ──────────────────────────────
+@st.cache_data(ttl=3600)
+def get_filter_bounds():
+    r = execute("""
+        SELECT
+            MIN(b.year_built) FILTER (WHERE b.year_built > 1800) AS yr_min,
+            MAX(b.year_built)                                      AS yr_max,
+            MIN(b.living_area) FILTER (WHERE b.living_area > 0)   AS sqft_min,
+            MAX(b.living_area) FILTER (WHERE b.living_area < 20000) AS sqft_max,
+            MIN(p.total_appr_val) FILTER (WHERE p.total_appr_val > 0) AS val_min,
+            MAX(p.total_appr_val) FILTER (WHERE p.total_appr_val < 5000000) AS val_max
+        FROM leads l
+        JOIN parcels p  ON p.parcel_id = l.parcel_id
+        LEFT JOIN buildings b ON b.parcel_id = p.parcel_id AND b.building_num = 1
+        WHERE l.source = 'hcad_auto'
+    """)
+    return r[0] if r else {}
+
+bounds = get_filter_bounds()
+
+# ── Sidebar filters ───────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Filters")
+    st.header("🔎 Filters")
 
-    zip_options = execute("SELECT DISTINCT situs_zip FROM parcels WHERE situs_zip IS NOT NULL ORDER BY situs_zip")
-    zip_list = ["All"] + [r["situs_zip"] for r in zip_options]
-    sel_zip = st.selectbox("ZIP Code", zip_list)
-
-    sel_min_score = st.slider("Min Distress Score", 0, 20, 5)
-
-    sel_priority = st.multiselect("Priority", ["high", "medium", "low"], default=["high", "medium"])
-
-    distress_type = st.multiselect(
-        "Distress Signals",
-        ["Absentee Owner", "Low Condition", "Very Low Condition", "Vacant Lot"],
-        default=["Very Low Condition", "Low Condition"],
+    # ZIP — multi-select
+    zip_options = execute(
+        "SELECT DISTINCT situs_zip, COUNT(*) AS n "
+        "FROM leads l JOIN parcels p ON p.parcel_id=l.parcel_id "
+        "WHERE l.source='hcad_auto' AND situs_zip IS NOT NULL "
+        "GROUP BY situs_zip ORDER BY situs_zip"
     )
-    run_score = st.button("🔄 Re-score All Leads", type="secondary",
-                          help="Recomputes scores from HCAD data (~2 min)")
+    zip_labels = {r["situs_zip"]: f"{r['situs_zip']} ({r['n']:,})" for r in zip_options}
+    sel_zips = st.multiselect("ZIP Codes", options=list(zip_labels.keys()),
+                              format_func=lambda z: zip_labels[z],
+                              placeholder="All ZIPs")
 
-# ── Re-score trigger ─────────────────────────────────────────────────────────
+    st.divider()
+
+    # Score
+    sel_min_score, sel_max_score = st.slider(
+        "Distress Score Range", 0, 20, (5, 20)
+    )
+
+    # Priority
+    sel_priority = st.multiselect("Priority", ["high", "medium", "low"],
+                                  default=["high", "medium"])
+
+    # Condition
+    st.markdown("**Building Condition**")
+    cond_very_low = st.checkbox("💀 Very Low", value=True)
+    cond_low      = st.checkbox("⚠️ Low",      value=True)
+    cond_average  = st.checkbox("➖ Average",   value=False)
+    cond_vacant   = st.checkbox("🏚️ Vacant Lot (no building)", value=False)
+    cond_good     = st.checkbox("✅ Good/Excellent", value=False)
+
+    st.divider()
+
+    # Owner filters
+    st.markdown("**Owner**")
+    sel_absentee_only = st.checkbox("Absentee owners only", value=False)
+    sel_owner_types = st.multiselect(
+        "Owner Type",
+        ["individual", "llc", "trust", "estate", "bank"],
+        placeholder="All types",
+    )
+    sel_not_pipeline = st.checkbox("Exclude leads already in pipeline", value=False)
+    sel_not_contacted = st.checkbox("Not yet contacted", value=False)
+
+    st.divider()
+
+    # Year built range
+    yr_min = int(bounds.get("yr_min") or 1900)
+    yr_max = int(bounds.get("yr_max") or 2024)
+    sel_yr = st.slider("Year Built", yr_min, yr_max, (yr_min, yr_max))
+
+    # Living area (sqft)
+    sq_min = int(bounds.get("sqft_min") or 0)
+    sq_max = int(min(bounds.get("sqft_max") or 10000, 10000))
+    sel_sqft = st.slider("Living Area (sqft)", sq_min, sq_max, (sq_min, sq_max))
+
+    # Value range
+    v_min = int(bounds.get("val_min") or 0)
+    v_max = int(min(bounds.get("val_max") or 1_000_000, 1_000_000))
+    sel_val = st.slider("Appraised Value ($)", v_min, v_max, (v_min, v_max),
+                        format="$%d")
+
+    st.divider()
+
+    # Sort
+    sort_by = st.selectbox("Sort By", [
+        "Score (highest first)",
+        "Appraised Value (lowest first)",
+        "Appraised Value (highest first)",
+        "Year Built (oldest first)",
+        "Year Built (newest first)",
+        "Address A→Z",
+    ])
+
+    run_score = st.button("🔄 Re-score All Leads", type="secondary",
+                          help="~2 min — recomputes from HCAD data")
+
+SORT_MAP = {
+    "Score (highest first)":         "l.motivated_score DESC, l.id",
+    "Appraised Value (lowest first)": "p.total_appr_val ASC NULLS LAST",
+    "Appraised Value (highest first)":"p.total_appr_val DESC NULLS LAST",
+    "Year Built (oldest first)":      "b.year_built ASC NULLS LAST",
+    "Year Built (newest first)":      "b.year_built DESC NULLS LAST",
+    "Address A→Z":                    "p.full_address ASC",
+}
+
+# ── Re-score trigger ──────────────────────────────────────────────────────────
 if run_score:
     with st.spinner("Scoring all parcels… this takes about 2 minutes"):
         from app.utils.scoring import run_batch_score
@@ -90,57 +180,80 @@ if run_score:
         f"Scored {counts['total_leads']:,} leads — "
         f"{counts['high']:,} high · {counts['medium']:,} medium · {counts['low_score']:,} low"
     )
+    st.cache_data.clear()
     st.rerun()
 
 # ── Check if leads exist ──────────────────────────────────────────────────────
 lead_count = execute("SELECT COUNT(*) AS n FROM leads WHERE source = 'hcad_auto'")[0]["n"]
 if lead_count == 0:
-    st.warning("No leads scored yet.")
-    st.info("Click **Re-score All Leads** in the sidebar to run the scoring engine against HCAD data (~2 min).")
+    st.warning("No leads scored yet. Click **Re-score All Leads** in the sidebar.")
     st.stop()
 
-# ── Stats header ─────────────────────────────────────────────────────────────
-stats = execute("""
-    SELECT
-        COUNT(*)                                     AS total,
-        COUNT(*) FILTER (WHERE priority = 'high')   AS high_ct,
-        COUNT(*) FILTER (WHERE priority = 'medium') AS med_ct,
-        AVG(motivated_score)::numeric(5,1)           AS avg_score
-    FROM leads WHERE source = 'hcad_auto' AND motivated_score >= %s
-""", (sel_min_score,))[0]
+# ── Build WHERE clause ────────────────────────────────────────────────────────
+conditions = [
+    "l.source = 'hcad_auto'",
+    "l.motivated_score >= %(min_score)s",
+    "l.motivated_score <= %(max_score)s",
+    "p.total_appr_val BETWEEN %(val_min)s AND %(val_max)s",
+]
+params: dict = {
+    "min_score": sel_min_score,
+    "max_score": sel_max_score,
+    "val_min": sel_val[0],
+    "val_max": sel_val[1],
+}
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Leads", f"{stats['total']:,}")
-c2.metric("High Priority", f"{stats['high_ct']:,}")
-c3.metric("Medium Priority", f"{stats['med_ct']:,}")
-c4.metric("Avg Score", str(stats["avg_score"] or 0))
-
-st.divider()
-
-# ── Build WHERE clause from filters ──────────────────────────────────────────
-conditions = ["l.source = 'hcad_auto'", "l.motivated_score >= %(min_score)s"]
-params: dict = {"min_score": sel_min_score}
-
-if sel_zip != "All":
-    conditions.append("p.situs_zip = %(zip)s")
-    params["zip"] = sel_zip
+if sel_zips:
+    conditions.append("p.situs_zip = ANY(%(zips)s)")
+    params["zips"] = sel_zips
 
 if sel_priority:
     conditions.append("l.priority = ANY(%(priority)s)")
     params["priority"] = sel_priority
 
-type_clauses = []
-if "Absentee Owner" in distress_type:
-    type_clauses.append("o.is_absentee = TRUE")
-if "Low Condition" in distress_type:
-    type_clauses.append("b.condition = 'Low'")
-if "Very Low Condition" in distress_type:
-    type_clauses.append("b.condition = 'Very Low'")
-if "Vacant Lot" in distress_type:
-    type_clauses.append("(b.id IS NULL AND COALESCE(p.improvement_val,0) < 5000)")
-if type_clauses:
-    conditions.append("(" + " OR ".join(type_clauses) + ")")
+if sel_absentee_only:
+    conditions.append("o.is_absentee = TRUE")
 
+if sel_owner_types:
+    conditions.append("o.owner_type = ANY(%(owner_types)s)")
+    params["owner_types"] = sel_owner_types
+
+if sel_not_pipeline:
+    conditions.append("""
+        NOT EXISTS (SELECT 1 FROM active_deals ad WHERE ad.lead_id = l.id
+                    AND ad.status NOT IN ('dead'))
+    """)
+
+if sel_not_contacted:
+    conditions.append("""
+        NOT EXISTS (SELECT 1 FROM lead_contact_log cl WHERE cl.lead_id = l.id)
+    """)
+
+# Year built range (only apply if building exists)
+conditions.append(
+    "(b.year_built IS NULL OR b.year_built BETWEEN %(yr_min)s AND %(yr_max)s)"
+)
+params["yr_min"] = sel_yr[0]
+params["yr_max"] = sel_yr[1]
+
+# Sqft range
+conditions.append(
+    "(b.living_area IS NULL OR b.living_area BETWEEN %(sqft_min)s AND %(sqft_max)s)"
+)
+params["sqft_min"] = sel_sqft[0]
+params["sqft_max"] = sel_sqft[1]
+
+# Condition checkboxes
+cond_clauses = []
+if cond_very_low: cond_clauses.append("b.condition = 'Very Low'")
+if cond_low:      cond_clauses.append("b.condition = 'Low'")
+if cond_average:  cond_clauses.append("b.condition = 'Average'")
+if cond_good:     cond_clauses.append("b.condition IN ('Good','Excellent','Superior')")
+if cond_vacant:   cond_clauses.append("(b.id IS NULL AND COALESCE(p.improvement_val,0) < 5000)")
+if cond_clauses:
+    conditions.append("(" + " OR ".join(cond_clauses) + ")")
+
+order = SORT_MAP.get(sort_by, "l.motivated_score DESC, l.id")
 where = " AND ".join(conditions)
 
 rows = execute(f"""
@@ -151,82 +264,179 @@ rows = execute(f"""
         p.situs_zip,
         p.improvement_val,
         p.total_appr_val,
+        p.land_val,
+        p.situs_city,
         o.owner_name,
         o.owner_type,
         o.is_absentee,
+        o.mail_city,
+        o.mail_state,
         b.condition,
         b.year_built,
         b.living_area,
+        b.building_class,
         l.motivated_score AS score,
         l.priority,
         COALESCE(ds.absentee_score,  0) AS absentee_pts,
         COALESCE(ds.vacancy_score,   0) AS vacancy_pts,
-        COALESCE(ds.portfolio_score, 0) AS portfolio_pts
+        COALESCE(ds.portfolio_score, 0) AS portfolio_pts,
+        EXISTS(SELECT 1 FROM lead_contact_log cl WHERE cl.lead_id = l.id) AS contacted,
+        EXISTS(SELECT 1 FROM active_deals ad WHERE ad.lead_id = l.id
+               AND ad.status NOT IN ('dead')) AS in_pipeline
     FROM leads l
     JOIN  parcels p  ON p.parcel_id = l.parcel_id
     LEFT JOIN owners o    ON o.parcel_id = p.parcel_id
     LEFT JOIN buildings b ON b.parcel_id = p.parcel_id AND b.building_num = 1
     LEFT JOIN deal_scores ds ON ds.lead_id = l.id
     WHERE {where}
-    ORDER BY l.motivated_score DESC, l.id
-    LIMIT 1000
+    ORDER BY {order}
+    LIMIT 500
 """, params)
 
+# ── Stats header ──────────────────────────────────────────────────────────────
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Matching Leads", f"{len(rows):,}")
+c2.metric("High Priority 🔴", sum(1 for r in rows if r["priority"] == "high"))
+c3.metric("Absentee 👤",      sum(1 for r in rows if r["is_absentee"]))
+c4.metric("Not Contacted 📭", sum(1 for r in rows if not r["contacted"]))
+c5.metric("Not in Pipeline",  sum(1 for r in rows if not r["in_pipeline"]))
+
 if not rows:
-    st.info("No leads match the current filters.")
+    st.info("No leads match the current filters. Try relaxing the criteria.")
     st.stop()
 
-st.caption(f"Showing up to 1,000 of matching leads — adjust filters to narrow down")
+st.divider()
 
-# ── Render table ──────────────────────────────────────────────────────────────
+# ── View toggle ───────────────────────────────────────────────────────────────
+view = st.radio("View", ["📋 Table", "🃏 Cards"], horizontal=True, label_visibility="collapsed")
+st.caption(f"Showing up to 500 matches — use filters to narrow down")
+
 PRIORITY_ICON = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-CONDITION_ICON = {"Very Low": "💀", "Low": "⚠️", "Average": "➖", "Good": "✅"}
+CONDITION_ICON = {"Very Low": "💀", "Low": "⚠️", "Average": "➖", "Good": "✅", "Excellent": "✅", "Superior": "✅"}
 
-for row in rows:
-    signals = []
-    if row["is_absentee"]:   signals.append("👤 Absentee")
-    if row["vacancy_pts"] >= 10: signals.append(f"{CONDITION_ICON.get(row['condition'],'⚠️')} {row['condition']} Condition")
-    if row["portfolio_pts"]:  signals.append("📦 Portfolio")
+# ── TABLE VIEW ────────────────────────────────────────────────────────────────
+if view == "📋 Table":
+    import pandas as pd
+    df_rows = []
+    for r in rows:
+        sigs = []
+        if r["is_absentee"]:        sigs.append("👤")
+        if r["vacancy_pts"] >= 15:  sigs.append("💀")
+        elif r["vacancy_pts"] >= 10: sigs.append("⚠️")
+        if r["portfolio_pts"]:      sigs.append("📦")
+        if r["contacted"]:          sigs.append("📞")
+        if r["in_pipeline"]:        sigs.append("📋")
+        df_rows.append({
+            "Score":     r["score"],
+            "Pri":       PRIORITY_ICON.get(r["priority"], ""),
+            "Address":   r["full_address"] or r["parcel_id"],
+            "ZIP":       r["situs_zip"] or "",
+            "Owner":     (r["owner_name"] or "—")[:30],
+            "Type":      r["owner_type"] or "—",
+            "Condition": r["condition"] or "—",
+            "Sqft":      int(r["living_area"]) if r["living_area"] else None,
+            "Yr Built":  r["year_built"],
+            "Value ($)": int(r["total_appr_val"]) if r["total_appr_val"] else None,
+            "Signals":   " ".join(sigs),
+            "_lead_id":  r["lead_id"],
+        })
+    df = pd.DataFrame(df_rows)
 
-    icon = PRIORITY_ICON.get(row["priority"], "")
-    label = (
-        f"{icon} **{row['full_address'] or row['parcel_id']}**  "
-        f"· Score {row['score']}  "
-        f"· {row['owner_name'] or 'Unknown Owner'}  "
-        f"· {fmt_currency(row['total_appr_val'])}  "
-        f"· {' · '.join(signals) if signals else ''}"
+    st.dataframe(
+        df.drop(columns=["_lead_id"]),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Score":     st.column_config.NumberColumn(width="small"),
+            "Pri":       st.column_config.TextColumn("!", width="small"),
+            "Sqft":      st.column_config.NumberColumn(format="%d"),
+            "Value ($)": st.column_config.NumberColumn(format="$%d"),
+        },
     )
-    with st.expander(label):
-        a, b_, c_ = st.columns(3)
-        a.markdown(f"**Parcel ID:** `{row['parcel_id']}`")
-        a.markdown(f"**ZIP:** {row['situs_zip']}")
-        a.markdown(f"**Appraised:** {fmt_currency(row['total_appr_val'])}")
-        a.markdown(f"**Improvement:** {fmt_currency(row['improvement_val'])}")
-        b_.markdown(f"**Owner:** {row['owner_name'] or '—'}")
-        b_.markdown(f"**Owner Type:** {row['owner_type'] or '—'}")
-        b_.markdown(f"**Absentee:** {'Yes' if row['is_absentee'] else 'No'}")
-        c_.markdown(f"**Condition:** {row['condition'] or '—'}")
-        c_.markdown(f"**Year Built:** {row['year_built'] or '—'}")
-        c_.markdown(f"**Living Area:** {int(row['living_area']):,} sqft" if row['living_area'] else "**Living Area:** —")
 
-        col_v, col_p, col_c = st.columns(3)
-        if col_v.button("🔍 Full Profile", key=f"prof_{row['lead_id']}"):
-            st.session_state["search_query"] = row["parcel_id"]
-            st.switch_page("pages/01_Search.py")
-        if col_c.button("📋 Log / Skip-Trace", key=f"log_{row['lead_id']}"):
-            contact_log_dialog(
-                lead_id=row["lead_id"], parcel_id=row["parcel_id"],
-                address=row["full_address"] or row["parcel_id"],
-                owner_name=row["owner_name"] or "",
-                mail_city=row.get("situs_city", ""), mail_state="TX",
-            )
-        if col_p.button("➕ Pipeline", key=f"pipe_{row['lead_id']}"):
-            existing = execute("SELECT id FROM active_deals WHERE lead_id = %s", (row["lead_id"],))
-            if existing:
-                st.warning("Already in pipeline")
-            else:
-                execute("""
-                    INSERT INTO active_deals (lead_id, status, created_at)
-                    VALUES (%s, 'new_lead', NOW())
-                """, (row["lead_id"],), commit=True)
-                st.success("Added to pipeline!")
+    st.caption("Click a row in the table above then use the actions below:")
+    sel_addr = st.selectbox("Select property for actions",
+                            options=[r["full_address"] or r["parcel_id"] for r in rows],
+                            label_visibility="collapsed")
+    sel_row  = next((r for r in rows if (r["full_address"] or r["parcel_id"]) == sel_addr), rows[0])
+
+    act1, act2, act3 = st.columns(3)
+    if act1.button("🔍 Full Profile"):
+        st.session_state["search_query"] = sel_row["parcel_id"]
+        st.switch_page("pages/01_Search.py")
+    if act2.button("💡 Deal Analysis"):
+        st.session_state["analysis_parcel_id"] = sel_row["parcel_id"]
+        st.switch_page("pages/04_Analysis.py")
+    if act3.button("📋 Log / Skip-Trace"):
+        contact_log_dialog(
+            lead_id=sel_row["lead_id"], parcel_id=sel_row["parcel_id"],
+            address=sel_row["full_address"] or sel_row["parcel_id"],
+            owner_name=sel_row["owner_name"] or "",
+            mail_city=sel_row.get("mail_city") or sel_row.get("situs_city") or "",
+            mail_state=sel_row.get("mail_state") or "TX",
+        )
+
+# ── CARD VIEW ─────────────────────────────────────────────────────────────────
+else:
+    for row in rows:
+        signals = []
+        if row["is_absentee"]:        signals.append("👤 Absentee")
+        if row["vacancy_pts"] >= 15:  signals.append("💀 Very Low Condition")
+        elif row["vacancy_pts"] >= 10: signals.append("⚠️ Low Condition")
+        if row["portfolio_pts"]:      signals.append("📦 Portfolio Owner")
+        if row["contacted"]:          signals.append("📞 Contacted")
+        if row["in_pipeline"]:        signals.append("📋 In Pipeline")
+
+        icon = PRIORITY_ICON.get(row["priority"], "")
+        sqft_str = f"{int(row['living_area']):,} sqft" if row["living_area"] else "—"
+        label = (
+            f"{icon} **{row['full_address'] or row['parcel_id']}**  "
+            f"· Score **{row['score']}**  "
+            f"· {row['owner_name'] or '—'}  "
+            f"· {fmt_currency(row['total_appr_val'])}  "
+            f"· {sqft_str}  "
+            f"· {row['year_built'] or '—'}  "
+            + (f"· {' · '.join(signals)}" if signals else "")
+        )
+        with st.expander(label):
+            a, b_, c_ = st.columns(3)
+            a.markdown(f"**Parcel:** `{row['parcel_id']}`")
+            a.markdown(f"**ZIP:** {row['situs_zip']}")
+            a.markdown(f"**Appraised:** {fmt_currency(row['total_appr_val'])}")
+            a.markdown(f"**Improvement:** {fmt_currency(row['improvement_val'])}")
+            a.markdown(f"**Land Value:** {fmt_currency(row['land_val'])}")
+            b_.markdown(f"**Owner:** {row['owner_name'] or '—'}")
+            b_.markdown(f"**Type:** {row['owner_type'] or '—'}")
+            b_.markdown(f"**Absentee:** {'Yes ⚠️' if row['is_absentee'] else 'No'}")
+            b_.markdown(f"**Mailing:** {row['mail_city'] or '—'}, {row['mail_state'] or ''}")
+            c_.markdown(f"**Condition:** {CONDITION_ICON.get(row['condition'],'')} {row['condition'] or '—'}")
+            c_.markdown(f"**Year Built:** {row['year_built'] or '—'}")
+            c_.markdown(f"**Living Area:** {sqft_str}")
+            c_.markdown(f"**Class:** {row['building_class'] or '—'}")
+
+            col_v, col_a, col_p, col_c = st.columns(4)
+            if col_v.button("🔍 Profile", key=f"prof_{row['lead_id']}"):
+                st.session_state["search_query"] = row["parcel_id"]
+                st.switch_page("pages/01_Search.py")
+            if col_a.button("💡 Analysis", key=f"anal_{row['lead_id']}"):
+                st.session_state["analysis_parcel_id"] = row["parcel_id"]
+                st.switch_page("pages/04_Analysis.py")
+            if col_c.button("📋 Log / Skip-Trace", key=f"log_{row['lead_id']}"):
+                contact_log_dialog(
+                    lead_id=row["lead_id"], parcel_id=row["parcel_id"],
+                    address=row["full_address"] or row["parcel_id"],
+                    owner_name=row["owner_name"] or "",
+                    mail_city=row.get("mail_city") or row.get("situs_city") or "",
+                    mail_state=row.get("mail_state") or "TX",
+                )
+            if col_p.button("➕ Pipeline", key=f"pipe_{row['lead_id']}"):
+                if row["in_pipeline"]:
+                    st.info("Already in pipeline")
+                else:
+                    execute(
+                        "INSERT INTO active_deals (lead_id, status, created_at) VALUES (%s,'new_lead',NOW())",
+                        (row["lead_id"],), commit=True,
+                    )
+                    st.success("Added!")
+                    st.rerun()
+
