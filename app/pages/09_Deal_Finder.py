@@ -111,10 +111,11 @@ with list_col:
                 sqft = float(d["living_area"] or 1200)
                 cond = d["condition"] or "Low"
                 lo, hi = REPAIR_RATES.get(cond, (28, 40))
-                st.session_state["df_arv"]     = int(d["arv_estimate"] or d["total_mkt_val"] * 1.15)
+                _mkt = float(d["total_mkt_val"] or 0)
+                _arv = float(d["arv_estimate"] or _mkt * 1.15)
+                st.session_state["df_arv"]     = int(_arv)
                 st.session_state["df_repairs"] = int((lo + hi) / 2 * sqft)
-                st.session_state["df_offer"]   = int((d["arv_estimate"] or d["total_mkt_val"] * 1.15) * 0.65
-                                                      - (lo + hi) / 2 * sqft - 3000 - 10000)
+                st.session_state["df_offer"]   = int(_arv * 0.65 - (lo + hi) / 2 * sqft - 3000 - 10000)
                 st.rerun()
 
 # ── RIGHT: deal calculator ────────────────────────────────────────────────────
@@ -166,7 +167,7 @@ with calc_col:
     lo, hi = REPAIR_RATES.get(cond, (28, 40))
 
     # Default pre-fills (from session_state set when they clicked)
-    def_arv     = st.session_state.get("df_arv",     int(p["total_mkt_val"] * 1.15 if p["total_mkt_val"] else 100_000))
+    def_arv     = st.session_state.get("df_arv",     int(float(p["total_mkt_val"]) * 1.15 if p["total_mkt_val"] else 100_000))
     def_repairs = st.session_state.get("df_repairs", int((lo + hi) / 2 * sqft))
     def_offer   = st.session_state.get("df_offer",   int(p["purchase_price"] or max(0, def_arv * 0.65 - def_repairs - 3000 - 10000)))
 
