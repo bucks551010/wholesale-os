@@ -509,6 +509,69 @@ Cash buyers show up as **Warranty Deed** or **Special Warranty Deed** transactio
 
 # ── SKIP TRACE EXPORT / IMPORT ────────────────────────────────────────────────
 with tab_skip:
+    # ── Auto-enrich via Google Maps (free, no API key) ────────────────────
+    st.subheader("🗺️ Auto-Enrich from Google Maps (Free)")
+    st.caption("Uses a headless browser to search Google Maps for each company and extract real phone numbers and websites. No API key, no billing.")
+
+    enriched_count = execute("SELECT COUNT(DISTINCT buyer_id) AS n FROM buyer_contacts WHERE notes LIKE 'Google Maps%'")[0]["n"]
+    total_buyers   = execute("SELECT COUNT(*) AS n FROM cash_buyers")[0]["n"]
+    st.metric("Already enriched", f"{enriched_count:,} / {total_buyers:,} buyers")
+
+    ge1, ge2 = st.columns(2)
+    enrich_limit    = ge1.slider("Buyers to process per run", 10, 200, 50)
+    enrich_start_id = ge2.number_input("Resume from buyer ID greater than", min_value=0, value=0, step=1)
+
+    if st.button("🚀 Start Auto-Enrich", type="primary"):
+        st.info(f"Searching Google Maps for {enrich_limit} buyers — takes ~{enrich_limit*25//60} min. Don't close this tab.")
+        progress = st.progress(0)
+        status   = st.empty()
+
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        from scripts.enrich_buyers import run as run_enrich, scrape_google_maps, clean_phone, extract_url, log as enrich_log
+        from playwright.sync_api import sync_playwright
+
+        buyers_to_enrich = execute("""
+            SELECT b.id, b.display_name
+            FROM cash_buyers b
+            WHERE b.id > %s
+              AND NOT EXISTS (SELECT 1 FROM buyer_contacts bc WHERE bc.buyer_id = b.id)
+            ORDER BY b.id
+            LIMIT %s
+        """, (int(enrich_start_id), enrich_limit))
+
+        found_n = 0
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx     = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
+            page = ctx.new_page()
+            for i, b in enumerate(buyers_to_enrich):
+                status.text(f"[{i+1}/{len(buyers_to_enrich)}] {b['display_name']}")
+                info       = scrape_google_maps(page, b["display_name"])
+                phone      = clean_phone(info.get("phone", ""))
+                website    = extract_url(info.get("website", ""))
+                found_name = info.get("found_name", "").strip()
+                if phone or website:
+                    execute("""
+                        INSERT INTO buyer_contacts
+                            (buyer_id, full_name, phone, notes, is_primary, last_updated)
+                        VALUES (%s,%s,%s,%s,TRUE,NOW())
+                        ON CONFLICT DO NOTHING
+                    """, (b["id"], found_name or b["display_name"], phone or None,
+                          f"Google Maps auto-enrich · website: {website}" if website else "Google Maps auto-enrich"
+                          ), commit=True)
+                    found_n += 1
+                import time as _t; _t.sleep(2)
+                progress.progress((i + 1) / len(buyers_to_enrich))
+            ctx.close(); browser.close()
+
+        st.success(f"Done — {found_n} of {len(buyers_to_enrich)} buyers enriched with phone/website")
+        st.rerun()
+
+    st.divider()
     st.subheader("📤 Export for Skip Tracing")
     st.caption(
         "Export your buyer list as CSV, upload to BatchLeads/BatchSkipTracing/TLO, "
