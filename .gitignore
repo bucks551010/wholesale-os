@@ -1,0 +1,30 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+
+# Data files (large HCAD downloads)
+data/hcad/*.txt
+data/hcad/*.zip
+data/hcad/*.csv
+data/cache/
+
+# Generated documents
+data/contracts/
+data/exports/
+
+# Playwright browsers
+.local-chromium/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Pip install logs
+pip_*.txt
