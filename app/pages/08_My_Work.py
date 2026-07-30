@@ -147,7 +147,7 @@ with right_col:
                ad.contract_date, ad.purchase_price, ad.option_period_days, ad.option_expiry,
                ad.closing_date, ad.title_company, ad.title_company_contact,
                ad.earnest_money_amount, ad.em_status, ad.assignment_fee_target,
-               ad.status, ad.notes, ad.seller_notes, ad.created_at,
+               ad.status, ad.notes, ad.seller_notes, ad.assignment_price, ad.created_at,
                p.full_address, p.situs_zip, p.total_mkt_val, p.total_appr_val,
                p.land_val, p.improvement_val, p.parcel_id,
                l.motivated_score, l.deal_score, l.priority, l.notes AS lead_notes,
@@ -384,7 +384,7 @@ with right_col:
         st.caption("Your fee = what your buyer pays you − what you pay the seller.")
 
         _def_contract = int(d["purchase_price"] or 0)
-        _def_assign   = int(d["assignment_price"] or 0) if d["assignment_price"] else 0
+        _def_assign   = int(d.get("assignment_price") or 0)
 
         ap1, ap2 = st.columns(2)
         fc_contract = ap1.number_input(
