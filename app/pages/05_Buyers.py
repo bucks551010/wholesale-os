@@ -9,51 +9,130 @@ st.set_page_config(page_title="Cash Buyers", page_icon="💰", layout="wide")
 st.title("💰 Cash Buyer Database")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_list, tab_add, tab_mine, tab_csv, tab_clerk, tab_match = st.tabs([
+tab_list, tab_add, tab_mine, tab_csv, tab_clerk, tab_match, tab_skip = st.tabs([
     "📋 Buyer List", "➕ Add Buyer",
     "🏗️ Mine from HCAD", "📥 CSV Import", "🏛️ County Clerk Deeds",
-    "🎯 Match Leads",
+    "🎯 Match Leads", "📤 Skip Trace",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_list:
+    import urllib.parse
+
+    b_search = st.text_input("🔍 Search buyers", placeholder="Name, ZIP, city…", label_visibility="collapsed")
+
     buyers = execute("""
         SELECT DISTINCT ON (b.id)
             b.id, b.display_name, b.entity_name, b.entity_type,
             b.phone, b.email, b.is_verified, b.deals_closed,
             b.reliability_pct, b.notes,
-            b.mailing_city, b.mailing_state,
+            b.mailing_address, b.mailing_city, b.mailing_state, b.mailing_zip,
             bb.min_price, bb.max_price, bb.max_repairs, bb.zip_codes
         FROM cash_buyers b
         LEFT JOIN buyer_buyboxes bb ON bb.buyer_id = b.id
         ORDER BY b.id, bb.id
     """)
 
-    if not buyers:
-        st.info("No buyers yet. Use **Add Buyer** to add your first cash buyer.")
-    else:
-        st.caption(f"{len(buyers)} buyers in database")
-        for b in buyers:
-            verified = "✅ " if b["is_verified"] else ""
-            label = f"{verified}**{b['display_name']}**"
-            if b["entity_name"]: label += f"  ·  {b['entity_name']}"
-            with st.expander(label):
-                c1, c2, c3 = st.columns(3)
-                c1.markdown(f"**Phone:** {b['phone'] or '—'}")
-                c1.markdown(f"**Email:** {b['email'] or '—'}")
-                c1.markdown(f"**Deals closed:** {b['deals_closed'] or 0}")
-                c1.markdown(f"**Reliability:** {b['reliability_pct'] or '—'}%")
-                c2.markdown(f"**Entity:** {b['entity_name'] or '—'} ({b['entity_type'] or '—'})")
-                c2.markdown(f"**City:** {b['mailing_city'] or '—'}, {b['mailing_state'] or ''}")
-                price_range = ""
-                if b["min_price"] or b["max_price"]:
-                    price_range = f"{fmt_currency(b['min_price'])} – {fmt_currency(b['max_price'])}"
-                c3.markdown(f"**Price range:** {price_range or '—'}")
-                if b["notes"]:
-                    st.caption(f"Notes: {b['notes']}")
+    if b_search:
+        q = b_search.lower()
+        buyers = [b for b in buyers if q in (b["display_name"] or "").lower()
+                  or q in (b["mailing_city"] or "").lower()
+                  or q in " ".join(b["zip_codes"] or [])]
 
-                if st.button("🗑️ Remove", key=f"del_{b['id']}"):
-                    execute("DELETE FROM cash_buyers WHERE id = %s", (b["id"],), commit=True)
+    if not buyers:
+        st.info("No buyers yet — use **🏗️ Mine from HCAD** or **➕ Add Buyer**.")
+    else:
+        st.caption(f"{len(buyers):,} buyers")
+        for b in buyers:
+            contacts = execute(
+                "SELECT * FROM buyer_contacts WHERE buyer_id=%s ORDER BY is_primary DESC, id",
+                (b["id"],)
+            )
+            primary = next((c for c in contacts if c["is_primary"]), contacts[0] if contacts else None)
+
+            verified  = "✅ " if b["is_verified"] else ""
+            pri_tag   = f" · 📞 {primary['full_name']}" if primary else ""
+            price_str = ""
+            if b["min_price"] or b["max_price"]:
+                price_str = f" · {fmt_currency(b['min_price'])}–{fmt_currency(b['max_price'])}"
+            label = f"{verified}**{b['display_name']}**{pri_tag}{price_str}"
+
+            with st.expander(label):
+                info_col, contact_col, research_col = st.columns([2, 2, 1])
+
+                with info_col:
+                    st.markdown("**Company Info**")
+                    st.markdown(f"Type: `{b['entity_type'] or '—'}`")
+                    st.markdown(f"Mail: {b['mailing_address'] or ''}, {b['mailing_city'] or '—'}, {b['mailing_state'] or ''} {b['mailing_zip'] or ''}")
+                    if b["zip_codes"]:
+                        st.markdown(f"Buy ZIPs: {', '.join(b['zip_codes'][:10])}")
+                    if b["notes"]:
+                        st.caption(b["notes"])
+
+                with contact_col:
+                    st.markdown("**Contacts**")
+                    if contacts:
+                        for c in contacts:
+                            star = "⭐ " if c["is_primary"] else ""
+                            lines = [f"{star}**{c['full_name']}**"]
+                            if c["title"]:    lines.append(c["title"])
+                            if c["phone"]:    lines.append(f"📞 {c['phone']}")
+                            if c["cell_phone"]: lines.append(f"📱 {c['cell_phone']}")
+                            if c["email"]:    lines.append(f"✉️ {c['email']}")
+                            if c["linkedin_url"]:
+                                lines.append(f"[LinkedIn]({c['linkedin_url']})")
+                            st.markdown("  \n".join(lines))
+                            if st.button("🗑️", key=f"delc_{c['id']}", help="Remove contact"):
+                                execute("DELETE FROM buyer_contacts WHERE id=%s", (c["id"],), commit=True)
+                                st.rerun()
+                            st.divider()
+                    else:
+                        st.caption("No contacts yet")
+
+                    # Inline add contact form
+                    with st.popover("➕ Add Contact"):
+                        cn = st.text_input("Full Name *",    key=f"cn_{b['id']}")
+                        ct = st.text_input("Title / Role",   key=f"ct_{b['id']}", placeholder="Owner / Asset Manager")
+                        cp = st.text_input("Office Phone",   key=f"cp_{b['id']}")
+                        cc = st.text_input("Cell / Mobile",  key=f"cc_{b['id']}")
+                        ce = st.text_input("Email",          key=f"ce_{b['id']}")
+                        cl = st.text_input("LinkedIn URL",   key=f"cl_{b['id']}")
+                        cno= st.text_area("Notes",           key=f"cno_{b['id']}", height=60)
+                        cpr= st.checkbox("Primary contact",  key=f"cpr_{b['id']}")
+                        if st.button("Save Contact", key=f"csave_{b['id']}", type="primary"):
+                            if not cn.strip():
+                                st.error("Name required")
+                            else:
+                                if cpr:
+                                    execute("UPDATE buyer_contacts SET is_primary=FALSE WHERE buyer_id=%s",
+                                            (b["id"],), commit=True)
+                                execute("""
+                                    INSERT INTO buyer_contacts
+                                        (buyer_id, full_name, title, phone, cell_phone, email,
+                                         linkedin_url, notes, is_primary, last_updated)
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                                """, (b["id"], cn.strip(), ct.strip() or None, cp.strip() or None,
+                                      cc.strip() or None, ce.strip() or None,
+                                      cl.strip() or None, cno.strip() or None, cpr), commit=True)
+                                st.success("Saved!")
+                                st.rerun()
+
+                with research_col:
+                    st.markdown("**Research**")
+                    name_enc = urllib.parse.quote_plus(b["display_name"])
+                    addr_enc = urllib.parse.quote_plus(
+                        f"{b['mailing_address'] or ''} {b['mailing_city'] or ''} {b['mailing_state'] or ''}"
+                    )
+                    st.markdown(f"[🔍 Google](https://www.google.com/search?q={name_enc}+Houston+TX+real+estate+investor)")
+                    st.markdown(f"[💼 LinkedIn](https://www.linkedin.com/search/results/companies/?keywords={name_enc})")
+                    st.markdown(f"[🏛️ TX SOS](https://mycpa.cpa.state.tx.us/coa/Index.do?action=SEARCH&searchToken={name_enc})")
+                    if b["mailing_address"]:
+                        st.markdown(f"[🏠 WhitePages](https://www.whitepages.com/address/{addr_enc})")
+                    st.markdown(f"[📞 BatchLeads](https://app.batchleads.io/)")
+
+                act1, act2 = st.columns(2)
+                if act1.button("🗑️ Remove Buyer", key=f"del_{b['id']}"):
+                    execute("DELETE FROM cash_buyers WHERE id=%s", (b["id"],), commit=True)
                     st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,9 +507,117 @@ Cash buyers show up as **Warranty Deed** or **Special Warranty Deed** transactio
 - Export CSV → use **📥 CSV Import** tab above
 """)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ── SKIP TRACE EXPORT / IMPORT ────────────────────────────────────────────────
+with tab_skip:
+    st.subheader("📤 Export for Skip Tracing")
+    st.caption(
+        "Export your buyer list as CSV, upload to BatchLeads/BatchSkipTracing/TLO, "
+        "then re-import the enriched file with phone numbers and emails."
+    )
+    import pandas as pd, io
 
-    st.subheader("Match Leads to Buyers")
+    skip_buyers = execute("""
+        SELECT b.id, b.display_name, b.entity_type,
+               b.mailing_address, b.mailing_city, b.mailing_state, b.mailing_zip,
+               COUNT(bc.id) AS contacts_already
+        FROM cash_buyers b
+        LEFT JOIN buyer_contacts bc ON bc.buyer_id = b.id
+        GROUP BY b.id
+        ORDER BY b.display_name
+    """)
+
+    only_no_contact = st.checkbox("Only buyers with no contacts yet", value=True)
+    if only_no_contact:
+        skip_buyers = [r for r in skip_buyers if r["contacts_already"] == 0]
+
+    st.markdown(f"**{len(skip_buyers):,} buyers to export**")
+
+    if skip_buyers and st.button("⬇️ Download Skip-Trace CSV"):
+        df = pd.DataFrame([{
+            "buyer_id":   r["id"],
+            "company":    r["display_name"],
+            "type":       r["entity_type"],
+            "address":    r["mailing_address"] or "",
+            "city":       r["mailing_city"] or "",
+            "state":      r["mailing_state"] or "",
+            "zip":        r["mailing_zip"] or "",
+        } for r in skip_buyers])
+        buf = io.BytesIO()
+        df.to_csv(buf, index=False)
+        st.download_button("📥 Save CSV", buf.getvalue(), "buyers_skip_trace.csv", "text/csv")
+
+    st.divider()
+    st.subheader("📥 Import Skip-Trace Results")
+    st.caption("Upload the enriched CSV returned by your skip-trace service. Must include a `buyer_id` or `company` column plus phone/email columns.")
+
+    st_file = st.file_uploader("Upload enriched CSV", type=["csv"], key="st_import")
+    if st_file:
+        import csv as _csv
+        content = st_file.read().decode("utf-8-sig", errors="replace")
+        rows    = list(_csv.DictReader(io.StringIO(content)))
+        if rows:
+            cols = list(rows[0].keys())
+            st.caption(f"{len(rows):,} rows · columns: {', '.join(cols)}")
+            op  = ["(skip)"] + cols
+
+            def bm(candidates):
+                for c in candidates:
+                    for col in cols:
+                        if c.lower() in col.lower(): return col
+                return "(skip)"
+
+            s1, s2, s3 = st.columns(3)
+            map_id    = s1.selectbox("Buyer ID col",   op, index=op.index(bm(["buyer_id","id"])))
+            map_name  = s2.selectbox("Company Name",   op, index=op.index(bm(["company","name","entity"])))
+            map_fname = s3.selectbox("Contact First Name", op, index=op.index(bm(["first","fname"])))
+            s4, s5, s6 = st.columns(3)
+            map_lname = s4.selectbox("Contact Last Name",  op, index=op.index(bm(["last","lname"])))
+            map_phone = s5.selectbox("Phone",   op, index=op.index(bm(["phone","office"])))
+            map_cell  = s6.selectbox("Cell",    op, index=op.index(bm(["cell","mobile","wireless"])))
+            map_email = st.selectbox("Email",   op, index=op.index(bm(["email","mail"])))
+
+            def gv(row, col):
+                return row.get(col, "").strip() if col != "(skip)" else ""
+
+            # Build buyer_id lookup from name if no ID column
+            if map_id == "(skip)" and map_name != "(skip)":
+                existing = {r["display_name"].upper(): r["id"]
+                            for r in execute("SELECT id, display_name FROM cash_buyers")}
+
+            if st.button("⬇️ Import Contacts", type="primary"):
+                added = skipped = 0
+                for row in rows:
+                    bid = None
+                    if map_id != "(skip)":
+                        try: bid = int(gv(row, map_id))
+                        except: pass
+                    elif map_name != "(skip)":
+                        bid = existing.get(gv(row, map_name).upper())
+                    if not bid:
+                        skipped += 1; continue
+
+                    first = gv(row, map_fname)
+                    last  = gv(row, map_lname)
+                    full  = f"{first} {last}".strip() or gv(row, map_name) or "Unknown"
+                    phone = gv(row, map_phone)
+                    cell  = gv(row, map_cell)
+                    email = gv(row, map_email)
+                    if not (phone or cell or email):
+                        skipped += 1; continue
+
+                    execute("""
+                        INSERT INTO buyer_contacts
+                            (buyer_id, full_name, phone, cell_phone, email, notes, is_primary, last_updated)
+                        VALUES (%s,%s,%s,%s,%s,'skip-trace import',TRUE,NOW())
+                        ON CONFLICT DO NOTHING
+                    """, (bid, full, phone or None, cell or None, email or None), commit=True)
+                    added += 1
+                st.success(f"Imported {added:,} contacts · skipped {skipped:,}")
+                st.rerun()
+
+# ── MATCH LEADS ──────────────────────────────────────────────────────────────
+with tab_match:
+    st.subheader("🎯 Match Leads to Buyers")
     buyers_for_match = execute("SELECT id, display_name FROM cash_buyers ORDER BY display_name")
 
     if not buyers_for_match:
