@@ -6,6 +6,9 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import streamlit as st
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency, fmt_address, owner_type_label
 
