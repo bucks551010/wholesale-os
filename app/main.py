@@ -17,13 +17,20 @@ st.set_page_config(
 )
 inject_theme()
 
+
+def safe_switch(page_relpath: str) -> None:
+    """Robust page switch — resolves the target relative to this script."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    target = os.path.normpath(os.path.join(here, page_relpath))
+    try:
+        st.switch_page(target if os.path.exists(target) else page_relpath)
+    except Exception as e:
+        st.error(f"Could not open **{os.path.basename(page_relpath)}** — {e}")
+
+
 _hour = datetime.now().hour
 _greet = "Good morning" if _hour < 12 else ("Good afternoon" if _hour < 18 else "Good evening")
-page_header(
-    APP_TITLE,
-    f"{_greet} — Harris County wholesale command center.",
-    icon="🏚️",
-)
+page_header(APP_TITLE, f"{_greet} — Harris County wholesale command center.", icon="🏚️")
 
 
 @st.cache_data(ttl=300)
@@ -47,24 +54,24 @@ def get_portfolio_stats():
 
 s = get_portfolio_stats()
 
-section_header("Portfolio")
-c1, c2, c3, c4 = st.columns(4)
+section_header("Portfolio Snapshot")
+c1, c2, c3, c4 = st.columns(4, gap="medium")
 with c1: kpi_card("Parcels Loaded",  f"{s['parcels']:,}",   f"{s['buildings']:,} buildings")
 with c2: kpi_card("Active Leads",    f"{s['active']:,}",    f"of {s['leads']:,} total")
 with c3: kpi_card("Deals in Motion", f"{s['deals']:,}",     f"{s['under_contract']:,} under contract", "up" if s['under_contract'] else "")
 with c4: kpi_card("Pipeline Value",  fmt_currency(s['pipeline_val']), f"{s['buyers']:,} cash buyers")
 
 
-section_header("Quick Actions")
-q1, q2, q3, q4 = st.columns(4)
-if q1.button("🔍  Search a Property", use_container_width=True, key="qa_search"):
-    st.switch_page("pages/01_Search.py")
+section_header("Command Center")
+q1, q2, q3, q4 = st.columns(4, gap="medium")
+if q1.button("🔍  Search Property", use_container_width=True, key="qa_search"):
+    safe_switch("pages/01_Search.py")
 if q2.button("🎯  Find Deals", use_container_width=True, key="qa_finder"):
-    st.switch_page("pages/09_Deal_Finder.py")
-if q3.button("📊  Analyze a Deal", use_container_width=True, key="qa_analysis"):
-    st.switch_page("pages/04_Analysis.py")
-if q4.button("💼  My Work", use_container_width=True, type="primary", key="qa_work"):
-    st.switch_page("pages/08_My_Work.py")
+    safe_switch("pages/09_Deal_Finder.py")
+if q3.button("📊  Analyze Deal", use_container_width=True, key="qa_analysis"):
+    safe_switch("pages/04_Analysis.py")
+if q4.button("💼  Open My Work", use_container_width=True, type="primary", key="qa_work"):
+    safe_switch("pages/08_My_Work.py")
 
 
 @st.cache_data(ttl=60)
@@ -84,10 +91,11 @@ def get_recent_activity():
     except Exception:
         return []
 
+
 recent = get_recent_activity()
 if recent:
     section_header("Active Deals")
-    STAGE_COLORS = {
+    STAGE_KIND = {
         "prospect": "info", "contacted": "info", "negotiating": "warning",
         "under_contract": "brand", "assigned": "success", "closed": "success",
         "dead": "danger",
@@ -95,31 +103,40 @@ if recent:
     for d in recent:
         addr = f"{d.get('situs_num','')} {d.get('situs_street','')}".strip() or d.get("parcel_id", "—")
         stage = (d.get("stage") or "prospect").lower()
-        stage_kind = STAGE_COLORS.get(stage, "info")
+        stage_kind = STAGE_KIND.get(stage, "info")
 
-        col_a, col_b, col_c, col_d = st.columns([3, 1.2, 1.2, 1])
-        with col_a:
-            st.markdown(
-                f"**{addr}**  {pill(stage.replace('_',' ').title(), stage_kind)}  "
-                f"<span style='color:{COLORS['muted']}; font-size:0.82rem'>ZIP {d.get('situs_zip','—')}</span>",
+        with st.container():
+            col_a, col_b, col_c, col_d = st.columns([3, 1.2, 1.2, 1], gap="small")
+            with col_a:
+                st.markdown(
+                    f"<div style='padding:6px 0'>"
+                    f"<div style='font-weight:700; font-size:1rem; color:{COLORS['text']}'>{addr}</div>"
+                    f"<div style='margin-top:4px'>{pill(stage.replace('_',' ').title(), stage_kind)}"
+                    f"<span style='color:{COLORS['muted']}; font-size:0.82rem; margin-left:6px'>ZIP {d.get('situs_zip','—')}</span></div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            col_b.markdown(
+                f"<div style='padding:6px 0'>"
+                f"<div style='font-size:0.68rem;color:{COLORS['muted']};text-transform:uppercase;font-weight:700;letter-spacing:0.08em'>Contract</div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-weight:700;font-size:1rem;color:{COLORS['text']};margin-top:2px'>{fmt_currency(d.get('purchase_price'))}</div>"
+                f"</div>",
                 unsafe_allow_html=True,
             )
-        col_b.markdown(
-            f"<div style='font-size:0.72rem;color:{COLORS['muted']};text-transform:uppercase;font-weight:600'>Contract</div>"
-            f"<div style='font-family:JetBrains Mono,monospace;font-weight:700'>{fmt_currency(d.get('purchase_price'))}</div>",
-            unsafe_allow_html=True,
-        )
-        col_c.markdown(
-            f"<div style='font-size:0.72rem;color:{COLORS['muted']};text-transform:uppercase;font-weight:600'>Assign Fee</div>"
-            f"<div style='font-family:JetBrains Mono,monospace;font-weight:700;color:{COLORS['success']}'>{fmt_currency(d.get('assignment_fee_target'))}</div>",
-            unsafe_allow_html=True,
-        )
-        with col_d:
-            if st.button("Open →", key=f"open_{d['id']}", use_container_width=True):
-                st.session_state["mw_selected_deal_id"] = d["id"]
-                st.switch_page("pages/08_My_Work.py")
+            col_c.markdown(
+                f"<div style='padding:6px 0'>"
+                f"<div style='font-size:0.68rem;color:{COLORS['muted']};text-transform:uppercase;font-weight:700;letter-spacing:0.08em'>Assign Fee</div>"
+                f"<div style='font-family:JetBrains Mono,monospace;font-weight:700;font-size:1rem;color:{COLORS['success']};margin-top:2px'>{fmt_currency(d.get('assignment_fee_target'))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            with col_d:
+                st.write("")
+                if st.button("Open →", key=f"open_{d['id']}", use_container_width=True):
+                    st.session_state["mw_selected_deal_id"] = d["id"]
+                    safe_switch("pages/08_My_Work.py")
         st.markdown(
-            f"<hr style='margin:8px 0;border-color:{COLORS['border']};opacity:0.5'/>",
+            f"<hr style='margin:8px 0;border-color:{COLORS['border']};opacity:0.6'/>",
             unsafe_allow_html=True,
         )
 else:
@@ -129,35 +146,39 @@ else:
 
 section_header("Everything You Can Do")
 FEATURES = [
-    ("🔍", "Property Search",   "Look up any Harris County address, parcel, or owner",  "pages/01_Search.py"),
-    ("📋", "Leads",             "Manage & score your entire lead pipeline",              "pages/02_Leads.py"),
-    ("🚚", "Pipeline",          "Kanban board of every deal by stage",                   "pages/03_Pipeline.py"),
-    ("📊", "Deal Analysis",     "Comps, ARV, repairs, MAO, all deal types",              "pages/04_Analysis.py"),
-    ("👥", "Cash Buyers",       "Buyer book, filters, blast lists",                      "pages/05_Buyers.py"),
-    ("📨", "Outreach",          "Skip-tracing & seller contact",                         "pages/06_Outreach.py"),
-    ("📝", "Contracts",         "Assignment agreements & closing docs",                  "pages/07_Contracts.py"),
-    ("💼", "My Work",           "Live workspace for every active deal",                  "pages/08_My_Work.py"),
-    ("🎯", "Deal Finder",       "Filter high-equity, distressed, absentee leads",        "pages/09_Deal_Finder.py"),
-    ("📈", "Comp Report",       "Printable comp report for buyers & sellers",            "pages/10_Comp_Report.py"),
+    ("🔍", "Property Search",   "Look up any Harris County address, parcel, or owner.",  "pages/01_Search.py"),
+    ("📋", "Leads",             "Score and manage your entire lead pipeline.",           "pages/02_Leads.py"),
+    ("🚚", "Pipeline",          "Kanban board of every deal by stage.",                  "pages/03_Pipeline.py"),
+    ("📊", "Deal Analysis",     "Comps, ARV, repairs, MAO, and every deal type.",        "pages/04_Analysis.py"),
+    ("👥", "Cash Buyers",       "Buyer book, filters, and blast lists.",                 "pages/05_Buyers.py"),
+    ("📨", "Outreach",          "Skip-trace and contact motivated sellers.",             "pages/06_Outreach.py"),
+    ("📝", "Contracts",         "Assignment agreements and closing docs.",               "pages/07_Contracts.py"),
+    ("💼", "My Work",           "Live workspace for every active deal.",                 "pages/08_My_Work.py"),
+    ("🎯", "Deal Finder",       "Filter high-equity, distressed, absentee leads.",       "pages/09_Deal_Finder.py"),
+    ("📈", "Comp Report",       "Printable comp reports for buyers and sellers.",        "pages/10_Comp_Report.py"),
 ]
-grid_cols = st.columns(3)
-for i, (icon, name, desc, page) in enumerate(FEATURES):
-    col = grid_cols[i % 3]
-    with col:
-        with st.container(border=True):
+rows = [FEATURES[i:i + 3] for i in range(0, len(FEATURES), 3)]
+for row in rows:
+    cols = st.columns(len(row), gap="medium")
+    for col, (icon, name, desc, page) in zip(cols, row):
+        with col:
             st.markdown(
-                f"<div style='font-size:1.5rem;line-height:1'>{icon}</div>"
-                f"<div style='font-weight:700;font-size:1.05rem;margin-top:6px'>{name}</div>"
-                f"<div style='color:{COLORS['muted']};font-size:0.85rem;margin:6px 0 12px 0;min-height:38px'>{desc}</div>",
+                f"<div class='ws-card'>"
+                f"<div class='ws-card-icon'>{icon}</div>"
+                f"<div class='ws-card-title'>{name}</div>"
+                f"<div class='ws-card-desc'>{desc}</div>"
+                f"</div>",
                 unsafe_allow_html=True,
             )
-            if st.button("Open", key=f"nav_{name}", use_container_width=True):
-                st.switch_page(page)
+            if st.button(f"Open  →", key=f"nav_{name}", use_container_width=True):
+                safe_switch(page)
 
 
 st.markdown(
-    f"<div style='text-align:center;color:{COLORS['muted']};font-size:0.75rem;margin-top:40px;padding:16px'>"
-    f"WholesaleOS · Harris County · Data live from Railway PostgreSQL · Updated {datetime.now().strftime('%b %d, %Y %H:%M')}"
+    f"<div style='text-align:center; color:{COLORS['muted2']}; font-size:0.75rem; "
+    f"margin-top:48px; padding:20px; border-top:1px solid {COLORS['border']}'>"
+    f"WholesaleOS  ·  Harris County  ·  Live data from Railway PostgreSQL  ·  "
+    f"Updated {datetime.now().strftime('%b %d, %Y  %H:%M')}"
     f"</div>",
     unsafe_allow_html=True,
 )
