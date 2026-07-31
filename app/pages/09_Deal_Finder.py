@@ -181,120 +181,78 @@ check whether your assignment price is within the buyer's MAO.
 
     st.divider()
     st.subheader("🧮 Your Deal Calculator")
-    st.caption("Adjust any input — your fee updates instantly.")
+    st.caption("Your fee = what your buyer pays you − what you pay the seller.")
 
-    # ── Calculator inputs ─────────────────────────────────────────────────
-    ci1, ci2, ci3 = st.columns(3)
-    calc_arv = ci1.number_input(
-        "ARV — After Repair Value ($)",
-        min_value=0, max_value=2_000_000,
-        value=def_arv, step=1000,
-        help="What will the property sell for after full renovation? Pull from comps or your own estimate.",
+    ap1, ap2 = st.columns(2)
+    calc_contract = ap1.number_input(
+        "Your Contract Price (what you pay seller) ($)",
+        min_value=0, value=def_contract, step=1000, key="df_calc_contract",
     )
-    calc_repairs = ci2.number_input(
-        "Your Repair Estimate ($)",
-        min_value=0, max_value=500_000,
-        value=def_repairs, step=500,
-        help=f"Pre-filled at ${(lo+hi)//2}/sqft × {int(sqft):,} sqft ({cond} condition). Override with your own number.",
-    )
-    calc_closing = ci3.number_input(
-        "Closing Costs ($)",
-        min_value=0, max_value=50_000,
-        value=3_000, step=250,
-        help="Title, escrow, transfer taxes. ~$3,000 typical in Harris County.",
+    calc_assign = ap2.number_input(
+        "Your Assignment Price (what buyer pays you) ($)",
+        min_value=0, value=def_assign, step=1000, key="df_calc_assign",
     )
 
-    ci4, ci5 = st.columns(2)
-    buyer_pct_choice = ci4.radio(
-        "Buyer's ARV %",
-        options=[60, 65, 70],
-        index=1,
-        horizontal=True,
-        help="60% = conservative, 65% = standard, 70% = you already have a buyer lined up.",
-        format_func=lambda x: f"{x}%",
-    )
-    calc_offer = ci5.number_input(
-        "Your Contract Price (offer to seller) ($)",
-        min_value=0, max_value=2_000_000,
-        value=max(0, def_offer), step=500,
-        help="What YOU agree to pay the seller. Your fee = Buyer's offer − this number.",
-    )
+    assign_fee = calc_assign - calc_contract
+    feasible   = assign_fee > 0 and calc_contract > 0
 
-    # ── Live calculation ──────────────────────────────────────────────────
-    buyer_pct    = buyer_pct_choice / 100.0
-    buyer_mao    = calc_arv * buyer_pct - calc_repairs - calc_closing
-    buyer_mao    = max(0.0, buyer_mao)
-    assign_fee   = buyer_mao - calc_offer
-    buyer_profit = calc_arv - calc_repairs - calc_closing - buyer_mao  # = 0 at exact MAO
-    feasible     = assign_fee > 0 and calc_offer > 0
+    res1, res2, res3 = st.columns(3)
+    res1.metric("Your Contract Price",    fmt_currency(calc_contract))
+    res2.metric("Your Assignment Price",  fmt_currency(calc_assign))
+    res3.metric("🏷️ YOUR ASSIGNMENT FEE", fmt_currency(assign_fee),
+                delta="✅ You profit" if feasible else ("❌ Negative" if calc_contract > 0 else "Enter your prices"),
+                delta_color="normal" if feasible else "inverse")
 
-    st.divider()
-
-    # ── Fee display ───────────────────────────────────────────────────────
-    res1, res2, res3, res4 = st.columns(4)
-    res1.metric("ARV",              fmt_currency(calc_arv))
-    res2.metric(f"Buyer's MAO ({buyer_pct_choice}%)", fmt_currency(buyer_mao))
-    res3.metric("Your Contract Price", fmt_currency(calc_offer))
-
-    fee_color = "normal" if assign_fee >= 0 else "inverse"
-    res4.metric(
-        "🏷️ YOUR ASSIGNMENT FEE",
-        fmt_currency(assign_fee),
-        delta="✅ Feasible" if feasible else ("❌ Underwater" if calc_offer > 0 else "Enter your offer"),
-        delta_color="normal" if feasible else "inverse",
-    )
-
-    # Waterfall breakdown
-    breakdown = {
-        "ARV":                      calc_arv,
-        f"× {buyer_pct_choice}% buyer rule":  - (calc_arv - calc_arv * buyer_pct),
-        "− Repairs":                -calc_repairs,
-        "− Closing Costs":          -calc_closing,
-        "= Buyer pays you":         buyer_mao,
-        "− Your contract price":    -calc_offer,
-        "🏷️ Your Assignment Fee":   assign_fee,
-    }
-
-    with st.container(border=True):
-        for label, val in breakdown.items():
-            lc, vc = st.columns([3, 1])
-            if label.startswith("🏷️"):
-                lc.markdown(f"**{label}**")
-                vc.markdown(
-                    f"**{'✅ ' if assign_fee > 0 else '❌ '}{fmt_currency(assign_fee)}**"
-                )
-            elif label.startswith("="):
-                lc.markdown(f"**{label}**")
-                vc.markdown(f"**{fmt_currency(val)}**")
-            else:
-                lc.write(label)
-                vc.write(fmt_currency(val) if val >= 0 else f"({fmt_currency(-val)})")
-
-    # ── 3 Scenarios ───────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("📊 All 3 Scenarios at Your Numbers")
-    sc_data = []
-    for lbl, pct in [("Conservative (60%)", 0.60), ("Standard (65%)", 0.65), ("Aggressive (70%)", 0.70)]:
-        mao = max(0, calc_arv * pct - calc_repairs - calc_closing)
-        fee = mao - calc_offer
-        sc_data.append({
-            "Scenario":     lbl,
-            "Buyer's MAO":  fmt_currency(mao),
-            "Your Offer":   fmt_currency(calc_offer),
-            "Your Fee":     fmt_currency(fee),
-            "Feasible":     "✅" if fee > 0 and calc_offer > 0 else "❌",
-        })
-    import pandas as pd
-    st.dataframe(pd.DataFrame(sc_data), use_container_width=True, hide_index=True)
-
-    # ── Repair hint ───────────────────────────────────────────────────────
-    if p["living_area"]:
+    with st.expander("🔍 Validate: Is your assignment price within the buyer's MAO?"):
         st.caption(
-            f"💡 Repair benchmark for **{cond}** condition: "
-            f"${lo}–${hi}/sqft × {int(sqft):,} sqft = "
-            f"**{fmt_currency(lo*sqft)} – {fmt_currency(hi*sqft)}**. "
-            f"You entered **{fmt_currency(calc_repairs)}**."
+            "Cash buyers using the 65% rule won't pay more than "
+            "ARV × % − repairs − closing. Confirm your assignment price is below their max."
         )
+        ci1, ci2, ci3 = st.columns(3)
+        calc_arv = ci1.number_input(
+            "ARV — After Repair Value ($)", min_value=0, value=def_arv, step=1000, key="df_calc_arv",
+        )
+        calc_repairs = ci2.number_input(
+            "Repair Estimate ($)", min_value=0, value=def_repairs, step=500, key="df_calc_rep",
+            help=f"Benchmark for {cond}: ${lo}–${hi}/sqft × {int(sqft):,} sqft",
+        )
+        calc_closing = ci3.number_input(
+            "Closing Costs ($)", min_value=0, value=3_000, step=250, key="df_calc_cls",
+        )
+        buyer_pct_choice = st.radio(
+            "Buyer's ARV %", [60, 65, 70], index=1, horizontal=True,
+            format_func=lambda x: f"{x}%", key="df_calc_pct",
+        )
+
+        buyer_pct    = buyer_pct_choice / 100.0
+        buyer_mao    = max(0.0, calc_arv * buyer_pct - calc_repairs - calc_closing)
+        buyer_margin = buyer_mao - calc_assign
+
+        vm1, vm2, vm3 = st.columns(3)
+        vm1.metric("Buyer's MAO",           fmt_currency(buyer_mao))
+        vm2.metric("Your Assignment Price", fmt_currency(calc_assign))
+        vm3.metric("Buyer's Margin",        fmt_currency(buyer_margin),
+                   delta="✅ Buyer makes money" if buyer_margin >= 0 else "❌ Over buyer's MAO",
+                   delta_color="normal" if buyer_margin >= 0 else "inverse")
+
+        if p["living_area"]:
+            st.caption(
+                f"💡 Repair benchmark for **{cond}**: "
+                f"${lo}–${hi}/sqft × {int(sqft):,} sqft = "
+                f"**{fmt_currency(lo*sqft)} – {fmt_currency(hi*sqft)}**"
+            )
+
+        import pandas as pd
+        sc_data = []
+        for lbl, pct in [("Conservative (60%)", 0.60), ("Standard (65%)", 0.65), ("Aggressive (70%)", 0.70)]:
+            mao = max(0, calc_arv * pct - calc_repairs - calc_closing)
+            sc_data.append({
+                "Scenario":       lbl,
+                "Buyer's MAO":    fmt_currency(mao),
+                "Buyer's Margin": fmt_currency(mao - calc_assign),
+                "Buyer Buys?":    "✅" if mao >= calc_assign else "❌",
+            })
+        st.dataframe(pd.DataFrame(sc_data), use_container_width=True, hide_index=True)
 
     # ── Action buttons ────────────────────────────────────────────────────
     st.divider()
@@ -312,9 +270,10 @@ check whether your assignment price is within the buyer's MAO.
         if deal_id:
             execute("""
                 UPDATE active_deals
-                SET purchase_price=%s, assignment_fee_target=%s
+                SET purchase_price=%s, assignment_price=%s, assignment_fee_target=%s
                 WHERE id=%s
-            """, (calc_offer or None, max(0, assign_fee) or None, deal_id), commit=True)
+            """, (calc_contract or None, calc_assign or None,
+                  max(0, assign_fee) or None, deal_id), commit=True)
             st.session_state["mw_deal_id"] = deal_id
             st.switch_page("pages/08_My_Work.py")
 
@@ -324,16 +283,12 @@ check whether your assignment price is within the buyer's MAO.
         else:
             execute("""
                 INSERT INTO offer_options
-                    (lead_id, scenario, arv, arv_pct, repair_cost, closing_costs,
-                     target_fee, offer_price, buyer_profit, feasible, calc_date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE)
+                    (lead_id, scenario, offer_price, target_fee, feasible, calc_date)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_DATE)
             """, (
                 sel_lead_id,
-                f"{buyer_pct_choice}% scenario",
-                calc_arv, buyer_pct_choice, calc_repairs, calc_closing,
-                max(0, assign_fee), calc_offer,
-                calc_arv - calc_repairs - calc_closing - calc_offer,
-                feasible,
+                f"Deal Finder: Contract ${calc_contract:,} → Assign ${calc_assign:,}",
+                calc_contract, max(0, assign_fee), feasible,
             ), commit=True)
             st.success("Scenario saved to deal history!")
 
