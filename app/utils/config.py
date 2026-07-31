@@ -16,6 +16,8 @@ DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
 SMTP_FROM: str = os.getenv("SMTP_FROM_EMAIL", "")
 SMTP_PASS: str = os.getenv("SMTP_APP_PASSWORD", "")
 
+GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
 # Offer formula defaults (all editable per deal)
 DEFAULT_CLOSING_COSTS = 3_000
 DEFAULT_ASSIGNMENT_FEE = 10_000

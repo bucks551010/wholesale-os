@@ -51,6 +51,7 @@ HCAD_BASE_URL = "https://download.hcad.org/data/CAMA"
 HCAD_FILES = {
     "real_acct":    f"{HCAD_BASE_URL}/{HCAD_YEAR}/Real_acct_owner.zip",
     "building_res": f"{HCAD_BASE_URL}/{HCAD_YEAR}/Real_building_land.zip",
+    "sale_hist":    f"{HCAD_BASE_URL}/{HCAD_YEAR}/Real_sale_history.zip",
 }
 
 # Column mappings — HCAD uses fixed column order (no headers in some files)
@@ -345,8 +346,36 @@ def _upsert_owners(batch: list[dict]):
         psycopg2.extras.execute_batch(cur, sql, batch, page_size=2000)
 
 
-def import_buildings(file_path: Path, target_parcel_ids: set[str]) -> int:
-    """Stream building_res.txt, upsert buildings for imported parcels."""
+def _load_fixtures(fixtures_path: Path, target_parcel_ids: set[str]) -> dict:
+    """Stream fixtures.txt and return {(acct, bld_num): {beds, baths, stories, pool}}."""
+    data: dict[tuple, dict] = {}
+    if not fixtures_path.exists():
+        log.warning(f"{fixtures_path.name} not found — beds/baths will be NULL")
+        return data
+    log.info(f"  Loading fixture data from {fixtures_path.name}...")
+    # fixture type -> field name
+    FIELD_MAP = {"RMB": "bedrooms", "RMF": "full_baths", "RMH": "half_baths",
+                 "STC": "stories", "SC1": "pool"}
+    for r in _stream_txt(fixtures_path):
+        acct = r.get("acct", "").strip()
+        if target_parcel_ids and acct not in target_parcel_ids:
+            continue
+        tp  = r.get("type", "").strip()
+        fld = FIELD_MAP.get(tp)
+        if not fld:
+            continue
+        key = (acct, r.get("bld_num", "1").strip() or "1")
+        if key not in data:
+            data[key] = {}
+        val = r.get("units", "")
+        data[key][fld] = safe_int(val) if fld != "pool" else (safe_int(val) or 0) > 0
+    log.info(f"  {len(data):,} (acct, bld_num) fixture records loaded")
+    return data
+
+
+def import_buildings(file_path: Path, target_parcel_ids: set[str],
+                     fixtures_path: Path | None = None) -> int:
+    """Stream building_res.txt; enrich with fixtures.txt for beds/baths/stories."""
     sql = """
         INSERT INTO buildings (
             parcel_id, building_num, living_area, year_built,
@@ -357,28 +386,45 @@ def import_buildings(file_path: Path, target_parcel_ids: set[str]) -> int:
             %(bedrooms)s, %(full_baths)s, %(half_baths)s, %(building_class)s,
             %(condition)s, %(stories)s, %(pool_flag)s, NOW()
         )
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (parcel_id, building_num) DO UPDATE SET
+            living_area    = EXCLUDED.living_area,
+            year_built     = EXCLUDED.year_built,
+            bedrooms       = EXCLUDED.bedrooms,
+            full_baths     = EXCLUDED.full_baths,
+            half_baths     = EXCLUDED.half_baths,
+            building_class = EXCLUDED.building_class,
+            condition      = EXCLUDED.condition,
+            stories        = EXCLUDED.stories,
+            pool_flag      = EXCLUDED.pool_flag,
+            last_updated   = NOW()
     """
+    fixtures = _load_fixtures(
+        fixtures_path or file_path.parent / "fixtures.txt",
+        target_parcel_ids
+    )
     log.info(f"  Streaming {file_path.name}...")
     batch: list[dict] = []
     total = 0
 
     for r in _stream_txt(file_path):
-        if r.get("acct", "").strip() not in target_parcel_ids:
+        acct = r.get("acct", "").strip()
+        if acct not in target_parcel_ids:
             continue
-        yr = safe_int(r.get("date_erected", "") or r.get("eff", ""))
+        yr      = safe_int(r.get("date_erected", "") or r.get("eff", ""))
+        bld_num = safe_int(r.get("bld_num", "1")) or 1
+        fx      = fixtures.get((acct, str(bld_num)), {})
         batch.append({
-            "parcel_id":      r.get("acct", "").strip(),
-            "building_num":   safe_int(r.get("bld_num", "1")) or 1,
+            "parcel_id":      acct,
+            "building_num":   bld_num,
             "living_area":    safe_numeric(r.get("heat_ar", "") or r.get("act_ar", "")),
             "year_built":     yr if yr and yr > 1800 else None,
-            "bedrooms":       None,
-            "full_baths":     None,
-            "half_baths":     None,
-            "building_class": r.get("property_use_cd", "").strip() or r.get("structure_dscr", "").strip() or None,
+            "bedrooms":       fx.get("bedrooms"),
+            "full_baths":     fx.get("full_baths"),
+            "half_baths":     fx.get("half_baths"),
+            "building_class": r.get("property_use_cd", "").strip() or None,
             "condition":      r.get("dscr", "").strip() or None,
-            "stories":        None,
-            "pool_flag":      False,
+            "stories":        fx.get("stories"),
+            "pool_flag":      fx.get("pool", False),
         })
 
         if len(batch) >= 2000:
@@ -396,6 +442,107 @@ def import_buildings(file_path: Path, target_parcel_ids: set[str]) -> int:
         total += len(batch)
 
     log.info(f"  {total:,} buildings upserted")
+    return total
+
+
+def import_land_sqft(file_path: Path, target_parcel_ids: set[str]) -> int:
+    """Stream land.txt, update parcels.land_sqft from primary SF land segment."""
+    if not file_path.exists():
+        log.warning(f"{file_path.name} not found — land_sqft will remain NULL")
+        return 0
+    log.info(f"  Streaming {file_path.name} for land sqft...")
+    # Collect best sqft per parcel (prefer num='1' with tp='SF')
+    best: dict[str, float] = {}
+    for r in _stream_txt(file_path):
+        acct = r.get("acct", "").strip()
+        if target_parcel_ids and acct not in target_parcel_ids:
+            continue
+        tp   = (r.get("tp") or "").strip().upper()
+        sz   = safe_numeric(r.get("sz_fact") or "")
+        num  = (r.get("num") or "1").strip()
+        if sz is None:
+            continue
+        sqft = sz * 43560 if tp == "AC" else sz if tp in ("SF", "") else None
+        if sqft is None:
+            continue
+        if acct not in best or (num == "1" and tp == "SF"):
+            best[acct] = sqft
+
+    log.info(f"  Upserting land_sqft for {len(best):,} parcels...")
+    sql  = "UPDATE parcels SET land_sqft=%s WHERE parcel_id=%s"
+    total = 0
+    batch = list(best.items())
+    with db_cursor(commit=True) as cur:
+        import psycopg2.extras
+        psycopg2.extras.execute_batch(cur, sql, [(v, k) for k, v in batch], page_size=5000)
+        total = len(batch)
+    log.info(f"  {total:,} parcel land areas updated")
+    return total
+
+
+def import_sale_history(file_path: Path, target_parcel_ids: set[str]) -> int:
+    """Stream real_sale_hist.txt, upsert recent arm's-length sales."""
+    sql = """
+        INSERT INTO sale_history
+            (parcel_id, sale_dt, sale_price, purchaser_nm, purchaser_tp, hcad_year)
+        VALUES
+            (%(parcel_id)s, %(sale_dt)s, %(sale_price)s,
+             %(purchaser_nm)s, %(purchaser_tp)s, %(hcad_year)s)
+        ON CONFLICT (parcel_id, sale_dt, sale_price) DO NOTHING
+    """
+    log.info(f"  Streaming {file_path.name}...")
+    batch: list[dict] = []
+    total = skipped = 0
+
+    for r in _stream_txt(file_path):
+        acct = (r.get("acct") or r.get("account_num") or "").strip()
+        if acct not in target_parcel_ids:
+            continue
+
+        # HCAD uses various column names across years
+        raw_price = r.get("sale_price") or r.get("price") or r.get("sales_price") or ""
+        raw_dt    = r.get("sale_dt") or r.get("sale_date") or r.get("deed_dt") or ""
+        price = safe_numeric(raw_price)
+        if not price or price < 5_000:
+            skipped += 1
+            continue  # skip non-arm's-length transfers
+
+        # Parse MMDDYYYY or YYYY-MM-DD
+        sale_date = None
+        dt = raw_dt.strip()
+        if dt:
+            try:
+                if "-" in dt:
+                    from datetime import date
+                    sale_date = date.fromisoformat(dt[:10])
+                elif len(dt) == 8:
+                    from datetime import date
+                    sale_date = date(int(dt[4:8]), int(dt[:2]), int(dt[2:4]))
+            except Exception:
+                pass
+
+        batch.append({
+            "parcel_id":   acct,
+            "sale_dt":     sale_date,
+            "sale_price":  price,
+            "purchaser_nm": (r.get("purchaser_nm") or r.get("grantee") or "").strip()[:200] or None,
+            "purchaser_tp": (r.get("purchaser_tp") or r.get("buyer_type") or "").strip()[:50] or None,
+            "hcad_year":   safe_int(r.get("yr") or r.get("sale_yr") or str(HCAD_YEAR)),
+        })
+
+        if len(batch) >= 2000:
+            with db_cursor(commit=True) as cur:
+                import psycopg2.extras
+                psycopg2.extras.execute_batch(cur, sql, batch, page_size=2000)
+            total += len(batch); batch = []
+
+    if batch:
+        with db_cursor(commit=True) as cur:
+            import psycopg2.extras
+            psycopg2.extras.execute_batch(cur, sql, batch, page_size=2000)
+        total += len(batch)
+
+    log.info(f"  {total:,} sales upserted, {skipped:,} non-arm's-length skipped")
     return total
 
 
@@ -465,17 +612,42 @@ def run(local_only: bool = False):
         else:
             log.warning("owners.txt not found — skipping owner import")
 
-        # ── Step 4: Import buildings ──────────────────────────
+        # ── Step 4: Import buildings (with fixture enrichment) ──────────
         if bldg_path and bldg_path.exists():
             log.info("Importing building_res.txt (streaming)...")
-            total_buildings = import_buildings(bldg_path, imported_ids)
+            fixtures_path = data_dir / "fixtures.txt"
+            total_buildings = import_buildings(bldg_path, imported_ids, fixtures_path)
         else:
             log.warning("building_res.txt not found — skipping building import")
 
-        log_finish(log_id, "success", total_parcels + total_owners + total_buildings,
+        # ── Step 4b: Update land sqft ─────────────────────────
+        land_path = data_dir / "land.txt"
+        if land_path.exists():
+            log.info("Importing land.txt for land_sqft...")
+            import_land_sqft(land_path, imported_ids)
+        else:
+            log.warning("land.txt not found — land_sqft will remain NULL")
+
+        # ── Step 5: Import sales history ─────────────────────
+        total_sales = 0
+        sale_path = _resolve_file(
+            data_dir, "real_sale_hist.txt",
+            HCAD_FILES["sale_hist"], local_only
+        )
+        if sale_path and sale_path.exists():
+            log.info("Importing real_sale_hist.txt (streaming)...")
+            total_sales = import_sale_history(sale_path, imported_ids)
+        else:
+            log.warning("real_sale_hist.txt not found — skipping sale history import")
+
+        log_finish(log_id, "success",
+                   total_parcels + total_owners + total_buildings + total_sales,
                    total_parcels, 0)
-        log.info(f"✅ HCAD ingestion complete — {total_parcels:,} parcels, "
-                 f"{total_owners:,} owners, {total_buildings:,} buildings")
+        log.info(
+            f"✅ HCAD ingestion complete — {total_parcels:,} parcels, "
+            f"{total_owners:,} owners, {total_buildings:,} buildings, "
+            f"{total_sales:,} sales"
+        )
 
     except Exception as e:
         log.exception("Ingestion failed")

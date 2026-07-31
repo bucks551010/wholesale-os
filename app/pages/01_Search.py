@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency, fmt_address, owner_type_label
+from app.utils.geo import geocode, street_view_url, photo_links
+from app.utils.config import GOOGLE_MAPS_API_KEY
 
 st.set_page_config(page_title="Search | WholesaleOS", layout="wide")
 st.title("🔍 Property Search")
@@ -120,12 +122,55 @@ def _save_parcel_to_my_work(parcel_id: str):
 
 
 def show_property_card(row: dict):
-    left, right = st.columns(2)
+    addr = fmt_address(row["situs_num"], row["situs_street"],
+                       row["situs_city"] or "Houston", "TX", row["situs_zip"] or "")
 
-    with left:
+    # ── Photo / map row ───────────────────────────────────────────────────────
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _coords(a: str, city: str):
+        return geocode(a, city=city, state="TX")
+
+    coords = _coords(addr, row.get("situs_city") or "Houston")
+
+    map_col, info_col, owner_col = st.columns([1, 1, 1], gap="medium")
+
+    with map_col:
+        if coords:
+            import folium
+            from streamlit_folium import st_folium
+            lat, lon = coords
+            if GOOGLE_MAPS_API_KEY:
+                sv_url = street_view_url(lat, lon, GOOGLE_MAPS_API_KEY)
+                st.image(sv_url, use_container_width=True, caption="📷 Street View")
+            else:
+                m = folium.Map(
+                    location=[lat, lon],
+                    zoom_start=18,
+                    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                    attr="Esri",
+                )
+                folium.Marker(
+                    [lat, lon],
+                    tooltip=addr,
+                    icon=folium.Icon(color="orange", icon="home", prefix="fa"),
+                ).add_to(m)
+                st_folium(m, width=320, height=240, returned_objects=[])
+        else:
+            st.markdown(
+                f'<div style="background:#1a1a1a;border-radius:10px;padding:20px;'
+                f'text-align:center;height:240px;display:flex;align-items:center;'
+                f'justify-content:center;flex-direction:column;">'
+                f'<div style="font-size:2.5rem;">🏠</div>'
+                f'<div style="font-size:0.8rem;color:#888;margin-top:8px;">Map unavailable</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        # Photo links
+        plinks = photo_links(addr, *coords) if coords else photo_links(addr)
+        st.markdown(" | ".join(f"[{n}]({u})" for n, u in plinks.items()), unsafe_allow_html=True)
+
+    with info_col:
         st.subheader("Property")
-        addr = fmt_address(row["situs_num"], row["situs_street"],
-                           row["situs_city"] or "Houston", "TX", row["situs_zip"] or "")
         st.markdown(f"**Address:** {addr}")
         st.markdown(f"**Parcel ID:** `{row['parcel_id']}`")
         st.markdown(f"**Type:** {row['acct_type'] or '—'}")
@@ -139,7 +184,7 @@ def show_property_card(row: dict):
         st.markdown(f"**HCAD Appraised:** {fmt_currency(row['total_appr_val'])}")
         st.markdown(f"**HCAD Market:**    {fmt_currency(row['total_mkt_val'])}")
 
-    with right:
+    with owner_col:
         st.subheader("Owner")
         st.markdown(f"**Name:** {row['owner_name'] or '—'}")
         st.markdown(f"**Type:** {owner_type_label(row['owner_name'])}")
@@ -171,13 +216,16 @@ def show_property_card(row: dict):
         st.markdown("✅ No distress signals found yet — run ingestion jobs to populate.")
 
     st.divider()
-    a1, a2, a3, a4 = st.columns(4)
+    a1, a2, a3, a4, a5 = st.columns(5)
     a1.button("➕ Add as Lead",       key=f"lead_{row['parcel_id']}")
     if a2.button("💰 Run Deal Analysis", key=f"deal_{row['parcel_id']}"):
         st.session_state["analysis_parcel_id"] = row["parcel_id"]
         st.switch_page("pages/04_Analysis.py")
-    a3.button("📋 View Full History", key=f"hist_{row['parcel_id']}")
-    if a4.button("📁 Save to My Work", key=f"work_{row['parcel_id']}", type="primary"):
+    if a3.button("📊 Comp Report", key=f"comp_{row['parcel_id']}"):
+        st.session_state["cr_query"] = row["full_address"] or row["parcel_id"]
+        st.switch_page("pages/10_Comp_Report.py")
+    a4.button("📋 View Full History", key=f"hist_{row['parcel_id']}")
+    if a5.button("📁 Save to My Work", key=f"work_{row['parcel_id']}", type="primary"):
         _save_parcel_to_my_work(row["parcel_id"])
 
 
