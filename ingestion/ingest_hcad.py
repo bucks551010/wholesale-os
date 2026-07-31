@@ -191,9 +191,13 @@ def import_real_acct(rows: list[dict], target_zips: set[str]) -> tuple[int, int]
       state_class (acct_type), ...,
       land_val, bld_val (improvement), ..., assessed_val, tot_appr_val, tot_mkt_val
     """
-    # site_addr_3 holds the 5-digit situs ZIP
-    filtered = [r for r in rows if r.get("site_addr_3", "")[:5] in target_zips]
-    log.info(f"  Filtered to {len(filtered):,} parcels in target ZIPs (from {len(rows):,} total)")
+    # site_addr_3 holds the 5-digit situs ZIP; empty target_zips means import all
+    if target_zips:
+        filtered = [r for r in rows if r.get("site_addr_3", "")[:5] in target_zips]
+        log.info(f"  Filtered to {len(filtered):,} parcels in target ZIPs (from {len(rows):,} total)")
+    else:
+        filtered = rows
+        log.info(f"  Importing all {len(filtered):,} parcels (no ZIP filter)")
 
     inserted = updated = 0
     batch = []
@@ -447,12 +451,12 @@ def log_finish(log_id: int, status: str, processed: int, inserted: int, updated:
 # ──────────────────────────────────────────────────────────
 
 def run(local_only: bool = False):
-    if not TARGET_ZIPS:
-        log.error("TARGET_ZIPS is empty. Set it in .env before running.")
-        sys.exit(1)
-
-    zip_set = set(z[:5] for z in TARGET_ZIPS)
-    log.info(f"Target ZIPs: {sorted(zip_set)}")
+    if TARGET_ZIPS and TARGET_ZIPS != ["ALL"]:
+        zip_set = set(z[:5] for z in TARGET_ZIPS)
+        log.info(f"Filtering to {len(zip_set)} target ZIPs: {sorted(zip_set)}")
+    else:
+        zip_set = set()  # empty = import all Harris County
+        log.info("TARGET_ZIPS=ALL — importing entire Harris County (no ZIP filter)")
 
     data_dir = Path(HCAD_DATA_DIR)
 
