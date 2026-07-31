@@ -11,6 +11,7 @@ import os, sys, urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency, fmt_address
 from app.utils.comps import (
@@ -23,6 +24,7 @@ from app.utils.geo import geocode, street_view_url, photo_links
 from app.utils.config import GOOGLE_MAPS_API_KEY
 
 st.set_page_config(page_title="Comp Report", page_icon="📊", layout="wide")
+inject_theme()
 
 # ── Dark-theme card styles ────────────────────────────────────────────────────
 st.markdown("""
@@ -54,8 +56,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Comp Report")
-st.caption("Search any property · review comps · get your numbers in 60 seconds.")
+page_header("Comp Report", "Search any property · review comps · get your numbers in 60 seconds.", icon="📊")
 
 # ── Step 1: Property Search ───────────────────────────────────────────────────
 st.markdown('<div class="step-label">Step 1 — Find Property</div>', unsafe_allow_html=True)

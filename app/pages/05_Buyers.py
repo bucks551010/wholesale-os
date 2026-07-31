@@ -2,12 +2,13 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 
 st.set_page_config(page_title="Cash Buyers", page_icon="💰", layout="wide")
-st.title("💰 Cash Buyer Database")
-
+inject_theme()
+page_header("Cash Buyer Database", "Filter, tag, and blast your buyer list.", icon="💰")
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_list, tab_add, tab_mine, tab_csv, tab_clerk, tab_match, tab_skip = st.tabs([
     "📋 Buyer List", "➕ Add Buyer",

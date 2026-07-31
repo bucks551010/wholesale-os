@@ -3,13 +3,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from datetime import date, timedelta
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 from app.utils.contracts import generate_purchase_contract, generate_assignment_contract
 
 st.set_page_config(page_title="Contracts", page_icon="📝", layout="wide")
-st.title("📝 Contract Generator")
-st.caption("⚠️ Templates only — have a licensed Texas real estate attorney review before use.")
+inject_theme()
+page_header("Contracts", "Assignment and closing document templates.", icon="📝")
+st.warning("⚠️ Templates only — have a licensed Texas real estate attorney review before use.")
 
 tab_purchase, tab_assign = st.tabs(["📋 Purchase Agreement", "🔀 Assignment Agreement"])
 

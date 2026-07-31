@@ -2,13 +2,14 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 from app.utils.comps import REPAIR_RATES
 
 st.set_page_config(page_title="Deal Finder", page_icon="🔥", layout="wide")
-st.title("🔥 Deal Finder")
-st.caption("Top opportunities ranked by distress score. Click any deal to run your numbers and see your assignment fee instantly.")
+inject_theme()
+page_header("Deal Finder", "Top opportunities ranked by distress score. Click any deal to run your numbers and see your assignment fee instantly.", icon="🔥")
 
 # ── Sidebar filters for the deal list ─────────────────────────────────────────
 with st.sidebar:

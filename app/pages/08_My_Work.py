@@ -3,6 +3,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 from app.utils.comps import (
@@ -26,6 +27,7 @@ except Exception:
     FOLIUM_OK = False
 
 st.set_page_config(page_title="My Work", page_icon="📁", layout="wide")
+inject_theme()
 
 # ── DB Bootstrap ──────────────────────────────────────────────────────────────
 _boot = [
@@ -104,7 +106,7 @@ pipeline_rows = execute("""
 pipeline_map  = {r["status"]: r["n"] for r in pipeline_rows}
 total_active  = sum(pipeline_map.values())
 
-st.title("📁 My Work")
+page_header("My Work", "Live workspace for every active deal.", icon="💼")
 if total_active:
     pcols = st.columns(len(STAGE_KEYS) + 1)
     pcols[0].metric("Total Active", total_active)

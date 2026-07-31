@@ -2,6 +2,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 from app.utils.comps import (
@@ -11,8 +12,8 @@ from app.utils.comps import (
 )
 
 st.set_page_config(page_title="Deal Analysis", page_icon="💡", layout="wide")
-st.title("💡 Deal Analysis")
-
+inject_theme()
+page_header("Deal Analysis", "Comps, ARV, repairs, MAO, and every deal type in one place.", icon="💡")
 # ── Property lookup ───────────────────────────────────────────────────────────
 default_pid = st.session_state.get("analysis_parcel_id", "")
 query = st.text_input("Parcel ID or Address", value=default_pid,

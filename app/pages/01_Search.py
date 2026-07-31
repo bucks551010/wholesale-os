@@ -6,6 +6,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -15,8 +16,8 @@ from app.utils.geo import geocode, street_view_url, photo_links
 from app.utils.config import GOOGLE_MAPS_API_KEY
 
 st.set_page_config(page_title="Search | WholesaleOS", layout="wide")
-st.title("🔍 Property Search")
-st.caption("Type an address, parcel ID, or owner name to pull the full property profile.")
+inject_theme()
+page_header("Property Search", "Type an address, parcel ID, or owner name to pull the full property profile.", icon="🔍")
 
 
 # ── Data helpers (defined before use) ────────────────────────────────────────

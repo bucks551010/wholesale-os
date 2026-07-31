@@ -2,12 +2,13 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 
 st.set_page_config(page_title="Pipeline", page_icon="📋", layout="wide")
-st.title("📋 Deal Pipeline")
-
+inject_theme()
+page_header("Deal Pipeline", "Kanban view of every deal by stage.", icon="📋")
 STAGES = [
     ("new_lead",       "🆕 New Lead"),
     ("contacted",      "📞 Contacted"),

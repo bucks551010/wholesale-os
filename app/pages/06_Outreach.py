@@ -4,12 +4,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import io
 import zipfile
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.contracts import render_yellow_letter
 
 st.set_page_config(page_title="Outreach", page_icon="✉️", layout="wide")
-st.title("✉️ Owner Outreach")
-
+inject_theme()
+page_header("Owner Outreach", "Skip-trace and contact motivated sellers.", icon="✉️")
 # ── Sender settings ───────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Your Info (Sender)")

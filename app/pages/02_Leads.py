@@ -2,6 +2,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import streamlit as st
+from app.utils.theme import inject_theme, page_header
 from app.utils.db import execute
 from app.utils.formatting import fmt_currency
 
@@ -59,9 +60,8 @@ def contact_log_dialog(lead_id: int, parcel_id: str, address: str,
             st.rerun()
 
 st.set_page_config(page_title="Leads", page_icon="🎯", layout="wide")
-st.title("🎯 Distressed Property Leads")
-
-
+inject_theme()
+page_header("Leads", "Score and manage your entire lead pipeline.", icon="🎯")
 def _save_to_my_work(lead_id: int):
     existing = execute(
         "SELECT id FROM active_deals WHERE lead_id=%s AND status!='dead' LIMIT 1", (lead_id,)
