@@ -115,7 +115,7 @@ with list_col:
                 _arv = float(d["arv_estimate"] or _mkt * 1.15)
                 st.session_state["df_arv"]      = int(_arv)
                 st.session_state["df_repairs"]  = int((lo + hi) / 2 * sqft)
-                st.session_state["df_contract"] = int(d["purchase_price"] or 0)
+                st.session_state["df_contract"] = int(d.get("purchase_price") or 0)
                 st.session_state["df_assign"]   = int(d.get("assignment_price") or 0)
                 st.rerun()
 
