@@ -27,6 +27,7 @@ if not query:
 rows = execute("""
     SELECT p.*, o.owner_name, o.owner_type, o.is_absentee,
            b.living_area, b.year_built, b.condition, b.building_class,
+           b.bedrooms, b.full_baths, b.half_baths,
            l.id AS lead_id, l.motivated_score
     FROM parcels p
     LEFT JOIN owners o    ON o.parcel_id = p.parcel_id
@@ -57,6 +58,8 @@ pc1.markdown(f"**Acct type:** {prop['acct_type'] or '—'}")
 pc2.markdown(f"**Owner:** {prop['owner_name'] or '—'}")
 pc2.markdown(f"**Owner type:** {prop['owner_type'] or '—'}")
 pc2.markdown(f"**Absentee:** {'Yes ⚠️' if prop['is_absentee'] else 'No'}")
+_hb = f" + {prop['half_baths']}h" if prop.get("half_baths") else ""
+pc3.markdown(f"**Beds / Baths:** {prop.get('bedrooms') or '?'} bed / {prop.get('full_baths') or '?'}{_hb} bath")
 pc3.markdown(f"**Living area:** {int(prop['living_area']):,} sqft" if prop['living_area'] else "**Living area:** —")
 pc3.markdown(f"**Year built:** {prop['year_built'] or '—'}")
 pc3.markdown(f"**Condition:** {prop['condition'] or '—'}")
